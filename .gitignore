@@ -1,0 +1,15 @@
+
+# VS Code
+.vscode/
+
+# React / Node
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.env
+frontend/.env.local
+
+# Python cache
+__pycache__/
+*.pyc
+rf/__pycache__/

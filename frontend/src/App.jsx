@@ -1,65 +1,73 @@
-import React from "react";
-import Home from "./pages/Home.jsx";
-import FallDashboard from "./pages/FallDashboard.jsx";
+import { useState } from "react";
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+  NavLink,
+} from "react-router-dom";
+
+import Home from "./pages/Home";
+import FallDashboard from "./pages/FallDashboard";
+// import AbnormalDashboard from "./pages/AbnormalDashboard";
+
+import "./App.css";
 
 function App() {
-  const [page, setPage] = React.useState("home");
-  const [menuOpen, setMenuOpen] = React.useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
 
-  const movePage = (target) => {
-    setPage(target);
+  const closeMenu = () => {
     setMenuOpen(false);
   };
 
   return (
-    <>
-      <div className="site-topbar">
-        <div className="site-brand" onClick={() => movePage("home")}>
-          <div className="brand-mark">S</div>
-          <div>
-            <strong>Smart Care AI</strong>
-            <span>독거노인 안전 관리 협업 관제 플랫폼</span>
-          </div>
-        </div>
-
-        <button className="hamburger-menu" onClick={() => setMenuOpen(true)}>
-          <span></span>
-          <span></span>
-          <span></span>
+    <BrowserRouter>
+      <div className="app-layout">
+        {/* 햄버거 버튼 */}
+        <button className="menu-button" onClick={() => setMenuOpen(true)}>
+          ☰
         </button>
-      </div>
 
-      {menuOpen && (
-        <div className="menu-backdrop" onClick={() => setMenuOpen(false)}>
-          <nav className="drawer-menu" onClick={(e) => e.stopPropagation()}>
-            <div className="drawer-top">
-              <div>
-                <h2>MENU</h2>
-                <p>Smart Care AI</p>
-              </div>
-              <button onClick={() => setMenuOpen(false)}>×</button>
+        {/* 어두운 배경 */}
+        {menuOpen && <div className="menu-backdrop" onClick={closeMenu}></div>}
+
+        {/* 사이드 메뉴 */}
+        <aside className={`side-menu ${menuOpen ? "open" : ""}`}>
+          <div className="side-menu-header">
+            <div>
+              <strong>Smart Care AI</strong>
+              <span>협업 관제 플랫폼</span>
             </div>
 
-            <button
-              className={page === "home" ? "active" : ""}
-              onClick={() => movePage("home")}
-            >
-              🏠 프로젝트 소개
-            </button>
+            <button onClick={closeMenu}>×</button>
+          </div>
 
-            <button
-              className={page === "fall" ? "active" : ""}
-              onClick={() => movePage("fall")}
-            >
-              🚨 노인낙상 관제시스템
-            </button>
+          <nav className="side-nav">
+            <NavLink to="/" onClick={closeMenu}>
+              홈
+            </NavLink>
+
+            <NavLink to="/fall" onClick={closeMenu}>
+              낙상 관제
+            </NavLink>
+
+            <NavLink to="/abnormal" onClick={closeMenu}>
+              이상행동 분석
+            </NavLink>
           </nav>
-        </div>
-      )}
+        </aside>
 
-      {page === "home" && <Home movePage={movePage} />}
-      {page === "fall" && <FallDashboard />}
-    </>
+        <main className="app-main">
+          <Routes>
+            <Route path="/" element={<Home />} />
+            <Route path="/fall" element={<FallDashboard />} />
+            {/* <Route path="/abnormal" element={<AbnormalDashboard />} /> */}
+
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </main>
+      </div>
+    </BrowserRouter>
   );
 }
 

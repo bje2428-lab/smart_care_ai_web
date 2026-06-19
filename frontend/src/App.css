@@ -1,759 +1,111 @@
-* {
-  box-sizing: border-box;
+.app-layout {
+  min-height: 100vh;
+  background: #f6f8fb;
 }
 
-body {
-  margin: 0;
-  font-family: "Pretendard", "Noto Sans KR", Arial, sans-serif;
-  background: #f4f7fb;
-  color: #172033;
-}
-
-button {
-  font-family: inherit;
-}
-
-button:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.app {
+.app-main {
   min-height: 100vh;
 }
 
-/* 상단 헤더 */
-.header {
-  height: 78px;
-  padding: 0 34px;
-  background: rgba(255, 255, 255, 0.9);
-  backdrop-filter: blur(14px);
-  border-bottom: 1px solid #e5e7eb;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  position: sticky;
-  top: 0;
-  z-index: 20;
-}
-
-.logo {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  cursor: pointer;
-}
-
-.logoIcon {
-  width: 44px;
-  height: 44px;
-  border-radius: 15px;
-  background: #2563eb;
-  color: white;
-  font-size: 25px;
+/* 왼쪽 위 햄버거 버튼 */
+.menu-button {
+  position: fixed;
+  top: 22px;
+  left: 22px;
+  z-index: 200;
+  width: 46px;
+  height: 46px;
+  border: 0;
+  border-radius: 14px;
+  background: #ffffff;
+  color: #0f172a;
+  font-size: 24px;
   font-weight: 900;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.logo h1 {
-  margin: 0;
-  font-size: 21px;
-}
-
-.logo p {
-  margin: 4px 0 0;
-  color: #64748b;
-  font-size: 13px;
-}
-
-.headerRight {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.serverBadge {
-  padding: 10px 14px;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 800;
-  border: 1px solid transparent;
-}
-
-.serverBadge.online {
-  background: #dcfce7;
-  color: #15803d;
-  border-color: #bbf7d0;
-}
-
-.serverBadge.fallback,
-.serverBadge.checking {
-  background: #eff6ff;
-  color: #1d4ed8;
-  border-color: #bfdbfe;
-}
-
-.serverBadge.offline {
-  background: #fee2e2;
-  color: #b91c1c;
-  border-color: #fecaca;
-}
-
-/* 햄버거 버튼 */
-.hamburger {
-  width: 48px;
-  height: 48px;
-  border: none;
-  background: #111827;
-  border-radius: 15px;
   cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  gap: 6px;
+  box-shadow: 0 12px 35px rgba(15, 23, 42, 0.14);
 }
 
-.hamburger span {
-  width: 22px;
-  height: 2px;
-  background: white;
-  border-radius: 999px;
-}
-
-/* 메뉴 */
-.menuOverlay {
+/* 메뉴 열렸을 때 뒤 배경 */
+.menu-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.45);
-  z-index: 50;
-  display: flex;
-  justify-content: flex-end;
+  z-index: 250;
+  background: rgba(15, 23, 42, 0.35);
 }
 
-.sideMenu {
-  width: 340px;
+/* 사이드 메뉴 */
+.side-menu {
+  position: fixed;
+  top: 0;
+  left: -320px;
+  z-index: 300;
+  width: 300px;
   height: 100vh;
-  background: white;
-  padding: 28px;
-  box-shadow: -20px 0 50px rgba(15, 23, 42, 0.18);
-  animation: slideIn 0.25s ease;
+  background: #ffffff;
+  border-right: 1px solid #e5eaf1;
+  box-shadow: 20px 0 60px rgba(15, 23, 42, 0.14);
+  transition: left 0.25s ease;
 }
 
-@keyframes slideIn {
-  from {
-    transform: translateX(80px);
-    opacity: 0;
-  }
-
-  to {
-    transform: translateX(0);
-    opacity: 1;
-  }
+.side-menu.open {
+  left: 0;
 }
 
-.menuTop {
+.side-menu-header {
+  height: 86px;
+  padding: 0 22px;
+  border-bottom: 1px solid #e5eaf1;
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 34px;
 }
 
-.menuTop h2 {
-  margin: 0;
-  font-size: 24px;
-}
-
-.menuTop p {
-  margin: 4px 0 0;
-  color: #64748b;
-}
-
-.menuTop button {
-  border: none;
-  background: #f1f5f9;
-  width: 38px;
-  height: 38px;
-  border-radius: 12px;
-  font-size: 25px;
-  cursor: pointer;
-}
-
-.sideMenu > button {
-  width: 100%;
-  border: none;
-  background: #f8fafc;
-  padding: 18px;
-  border-radius: 18px;
-  margin-bottom: 12px;
-  text-align: left;
-  font-size: 17px;
-  font-weight: 700;
-  color: #334155;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.sideMenu > button:hover,
-.sideMenu > button.active {
-  background: #2563eb;
-  color: white;
-}
-
-/* 메인 소개 페이지 */
-.homePage {
-  padding: 56px 7%;
-}
-
-.hero {
-  min-height: 520px;
-  display: grid;
-  grid-template-columns: 1.4fr 0.9fr;
-  gap: 44px;
-  align-items: center;
-}
-
-.subTitle {
-  color: #2563eb;
-  font-weight: 800;
-  margin: 0 0 14px;
-}
-
-.heroText h2 {
-  margin: 0;
-  font-size: 54px;
-  line-height: 1.15;
-  letter-spacing: -2px;
-}
-
-.heroDesc {
-  margin: 24px 0;
-  color: #64748b;
-  font-size: 18px;
-  line-height: 1.75;
-  max-width: 760px;
-}
-
-.heroButtons {
-  display: flex;
-  gap: 12px;
-}
-
-.heroButtons button,
-.blueBtn,
-.redBtn {
-  border: none;
-  padding: 14px 20px;
-  border-radius: 15px;
-  font-weight: 800;
-  cursor: pointer;
-}
-
-.heroButtons button,
-.blueBtn {
-  background: #2563eb;
-  color: white;
-}
-
-.heroButtons .outline {
-  background: white;
-  color: #2563eb;
-  border: 1px solid #bfdbfe;
-}
-
-.heroCard {
-  background: white;
-  border-radius: 34px;
-  padding: 34px;
-  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.1);
-  border: 1px solid #e5e7eb;
-}
-
-.elderIcon {
-  font-size: 72px;
-  margin-bottom: 24px;
-}
-
-.heroCard h3 {
-  font-size: 28px;
-  margin: 0 0 10px;
-}
-
-.heroCard p {
-  color: #64748b;
-  line-height: 1.6;
-}
-
-.miniStatus {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
-  margin-top: 28px;
-}
-
-.miniStatus div {
-  background: #f8fafc;
-  padding: 18px;
-  border-radius: 18px;
-}
-
-.miniStatus span {
+.side-menu-header strong {
   display: block;
-  color: #64748b;
-  font-size: 13px;
-  margin-bottom: 8px;
-}
-
-.miniStatus strong {
-  font-size: 26px;
-}
-
-.sectionTitle {
-  text-align: center;
-  margin: 70px 0 30px;
-}
-
-.sectionTitle p {
-  color: #2563eb;
-  font-weight: 800;
-  margin: 0 0 8px;
-}
-
-.sectionTitle h3 {
-  font-size: 34px;
-  margin: 0;
-}
-
-.featureGrid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 20px;
-}
-
-.featureCard {
-  background: white;
-  border-radius: 24px;
-  padding: 28px;
-  border: 1px solid #e5e7eb;
-  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.06);
-}
-
-.featureCard div {
-  font-size: 42px;
-}
-
-.featureCard h4 {
+  color: #0f172a;
   font-size: 20px;
-  margin: 18px 0 10px;
-}
-
-.featureCard p {
-  color: #64748b;
-  line-height: 1.6;
-  margin: 0;
-}
-
-.projectInfo {
-  margin-top: 28px;
-  display: grid;
-  grid-template-columns: 1.2fr 1fr;
-  gap: 22px;
-}
-
-.projectInfo > div {
-  background: white;
-  border-radius: 24px;
-  padding: 28px;
-  border: 1px solid #e5e7eb;
-}
-
-.projectInfo h3 {
-  margin-top: 0;
-}
-
-.projectInfo p {
-  color: #64748b;
-  line-height: 1.8;
-}
-
-.flow {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.flow span {
-  background: #eff6ff;
-  color: #1d4ed8;
-  padding: 12px 16px;
-  border-radius: 999px;
-  font-weight: 800;
-}
-
-.flow b {
-  color: #94a3b8;
-}
-
-/* 서비스 페이지 */
-.servicePage {
-  padding: 36px 7% 70px;
-}
-
-.pageHero {
-  padding: 46px;
-  border-radius: 32px;
-  color: white;
-  margin-bottom: 26px;
-}
-
-.pageHero p {
-  margin: 0 0 10px;
-  font-weight: 800;
-  opacity: 0.85;
-}
-
-.pageHero h2 {
-  margin: 0 0 12px;
-  font-size: 40px;
-}
-
-.pageHero span {
-  font-size: 17px;
-  opacity: 0.9;
-}
-
-.fallHero {
-  background: linear-gradient(135deg, #ef4444, #991b1b);
-}
-
-.dashboardGrid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 18px;
-  margin-bottom: 24px;
-}
-
-.statusCard {
-  background: white;
-  padding: 24px;
-  border-radius: 22px;
-  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.06);
-  border: 1px solid #e5e7eb;
-}
-
-.statusCard p {
-  margin: 0;
-  color: #64748b;
-}
-
-.statusCard h3 {
-  margin: 12px 0 0;
-  font-size: 32px;
-}
-
-.statusCard.danger {
-  background: #fff1f2;
-  border-color: #fecdd3;
-}
-
-.statusCard.warning {
-  background: #fffbeb;
-  border-color: #fde68a;
-}
-
-.contentGrid {
-  display: grid;
-  grid-template-columns: 1.6fr 1fr;
-  gap: 22px;
-  margin-bottom: 22px;
-}
-
-.panel {
-  background: white;
-  border-radius: 24px;
-  padding: 26px;
-  border: 1px solid #e5e7eb;
-  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.06);
-}
-
-.panel.large {
-  min-height: 350px;
-}
-
-.panelHeader {
-  display: flex;
-  justify-content: space-between;
-  gap: 18px;
-  align-items: flex-start;
-  margin-bottom: 20px;
-}
-
-.panelHeader.simple {
-  display: block;
-}
-
-.panelHeader h3,
-.panel h3 {
-  margin: 0 0 8px;
-}
-
-.panelHeader p,
-.panelDesc {
-  margin: 0;
-  color: #64748b;
-  line-height: 1.6;
-}
-
-.residentList {
-  display: flex;
-  flex-direction: column;
-  gap: 13px;
-}
-
-.residentCard {
-  display: grid;
-  grid-template-columns: 52px 1fr 100px 80px;
-  gap: 14px;
-  align-items: center;
-  background: #f8fafc;
-  padding: 16px;
-  border-radius: 18px;
-}
-
-.avatar {
-  width: 52px;
-  height: 52px;
-  border-radius: 18px;
-  background: #dbeafe;
-  color: #1d4ed8;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   font-weight: 900;
 }
 
-.residentCard p {
-  margin: 5px 0 0;
+.side-menu-header span {
+  display: block;
+  margin-top: 4px;
   color: #64748b;
-  font-size: 14px;
-}
-
-.time {
-  color: #94a3b8;
-  font-size: 13px;
-}
-
-.badge {
-  padding: 8px 12px;
-  border-radius: 999px;
   font-size: 12px;
-  font-weight: 900;
-  text-align: center;
+  font-weight: 700;
 }
 
-.badge.low {
-  background: #dcfce7;
-  color: #15803d;
+.side-menu-header button {
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 12px;
+  background: #f1f5f9;
+  color: #0f172a;
+  font-size: 22px;
+  cursor: pointer;
 }
 
-.badge.medium {
-  background: #fef3c7;
-  color: #b45309;
+.side-nav {
+  padding: 18px;
+  display: grid;
+  gap: 8px;
 }
 
-.badge.high {
-  background: #fee2e2;
-  color: #b91c1c;
-}
-
-.uploadBox {
-  margin: 22px 0;
-  border: 2px dashed #cbd5e1;
-  border-radius: 22px;
-  min-height: 180px;
-  background: #f8fafc;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 20px;
-  text-align: center;
-}
-
-.uploadBox span {
-  font-size: 38px;
-}
-
-.uploadBox p {
-  margin: 10px 0;
+.side-nav a {
+  padding: 15px 16px;
+  border-radius: 16px;
+  color: #475569;
+  text-decoration: none;
+  font-size: 15px;
   font-weight: 800;
-  word-break: break-all;
 }
 
-.redBtn {
-  background: #ef4444;
-  color: white;
+.side-nav a:hover {
+  background: #f1f5f9;
 }
 
-.full {
-  width: 100%;
-}
-
-.dangerResult,
-.safeResult,
-.errorBox {
-  margin-top: 18px;
-  padding: 18px;
-  border-radius: 18px;
-  line-height: 1.5;
-}
-
-.dangerResult {
-  background: #fff1f2;
-  color: #be123c;
-}
-
-.safeResult {
-  background: #ecfdf5;
-  color: #047857;
-}
-
-.errorBox {
-  background: #fff7ed;
-  color: #c2410c;
-}
-
-.dangerResult p,
-.safeResult p,
-.errorBox p {
-  margin: 8px 0 0;
-}
-
-.warningText {
-  font-size: 13px;
-  opacity: 0.9;
-}
-
-.resultPanel {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 24px;
-  margin-bottom: 22px;
-}
-
-.probabilityBox {
-  display: flex;
-  gap: 14px;
-}
-
-.probabilityBox div {
-  background: #f8fafc;
-  padding: 18px;
-  border-radius: 18px;
-  min-width: 130px;
-}
-
-.probabilityBox span {
-  display: block;
-  color: #64748b;
-  font-size: 13px;
-  margin-bottom: 8px;
-}
-
-.probabilityBox strong {
-  font-size: 26px;
-}
-
-/* 테이블 */
-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-th {
-  text-align: left;
-  color: #64748b;
-  font-size: 14px;
-  padding: 14px;
-  border-bottom: 1px solid #e5e7eb;
-}
-
-td {
-  padding: 16px 14px;
-  border-bottom: 1px solid #f1f5f9;
-  font-size: 14px;
-}
-
-/* 반응형 */
-@media (max-width: 1100px) {
-  .hero,
-  .projectInfo,
-  .contentGrid,
-  .resultPanel {
-    grid-template-columns: 1fr;
-    display: grid;
-  }
-
-  .featureGrid,
-  .dashboardGrid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
-  .heroText h2 {
-    font-size: 42px;
-  }
-
-  .probabilityBox {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-  }
-}
-
-@media (max-width: 700px) {
-  .header {
-    padding: 0 18px;
-  }
-
-  .logo p,
-  .serverBadge {
-    display: none;
-  }
-
-  .homePage,
-  .servicePage {
-    padding-left: 20px;
-    padding-right: 20px;
-  }
-
-  .heroText h2 {
-    font-size: 34px;
-  }
-
-  .featureGrid,
-  .dashboardGrid {
-    grid-template-columns: 1fr;
-  }
-
-  .sideMenu {
-    width: 82%;
-  }
-
-  .residentCard {
-    grid-template-columns: 52px 1fr;
-  }
-
-  .time {
-    display: none;
-  }
-
-  .probabilityBox {
-    grid-template-columns: 1fr;
-  }
+.side-nav a.active {
+  background: #eff6ff;
+  color: #2563eb;
 }

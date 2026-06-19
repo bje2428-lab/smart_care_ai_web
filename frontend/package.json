@@ -6,10 +6,10 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
+    "axios": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "axios": "latest"
-  },
-  "devDependencies": {}
+    "react-router-dom": "^7.18.0",
+    "vite": "latest"
+  }
 }
