@@ -8,19 +8,24 @@ from datetime import datetime
 
 import joblib
 import pandas as pd
-from fastapi import FastAPI, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import APIRouter, UploadFile, File
 from pymongo import MongoClient, DESCENDING
 
 
 # =========================================================
 # 프로젝트 경로 설정
-# backend/main.py 기준으로 상위 폴더가 C:\smart_care_ai
+# backend/FallDashboard.py 기준
+# ROOT_DIR    = C:\smart_care_ai_web
+# BACKEND_DIR = C:\smart_care_ai_web\backend
+# RF_DIR      = C:\smart_care_ai_web\rf
+# MODEL_DIR   = C:\smart_care_ai_web\models
 # =========================================================
-ROOT_DIR = Path(__file__).resolve().parents[1]
-RF_DIR = ROOT_DIR / "rf"
 
-# C:\smart_care_ai\rf 폴더 안의 .py 파일을 바로 찾게 함
+ROOT_DIR = Path(__file__).resolve().parents[1]
+BACKEND_DIR = Path(__file__).resolve().parent
+RF_DIR = ROOT_DIR / "rf"
+MODEL_DIR = ROOT_DIR / "models"
+
 if str(RF_DIR) not in sys.path:
     sys.path.insert(0, str(RF_DIR))
 
@@ -29,45 +34,60 @@ from predict_csv import postprocess_fall_result, get_fall_probability
 
 
 # =========================================================
-# 모델 경로
-# C:\smart_care_ai\models\mmwave_rf_model.pkl
-# C:\smart_care_ai\models\mmwave_rf_model_meta.json
+# Router
+# main.py에서 include_router로 연결됨
+# 최종 주소:
+# GET    /health
+# POST   /predict
+# GET    /events
+# GET    /stats
+# DELETE /events
 # =========================================================
-MODEL_PATH = ROOT_DIR / "models" / "mmwave_rf_model.pkl"
-META_PATH = ROOT_DIR / "models" / "mmwave_rf_model_meta.json"
+
+router = APIRouter(tags=["Fall Detection"])
+
+
+# =========================================================
+# 낙상 모델 경로 설정
+# pkl 파일은 전부 C:\smart_care_ai_web\models 안에 둠
+# 우선순위:
+# 1. mmwave_rf_smote_model.pkl
+# 2. mmwave_rf_model.pkl
+# 3. mmwave_rf_aug_model.pkl
+# =========================================================
+
+MODEL_CANDIDATES = [
+    MODEL_DIR / "mmwave_rf_smote_model.pkl",
+    MODEL_DIR / "mmwave_rf_model.pkl",
+    MODEL_DIR / "mmwave_rf_aug_model.pkl",
+]
 
 
 # =========================================================
 # MongoDB 설정
 # =========================================================
+
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "smart_care_ai")
 MONGO_COLLECTION_NAME = os.getenv("MONGO_COLLECTION_NAME", "detection_events")
-
-
-app = FastAPI(title="Smart Care AI - mmWave Fall Detection API")
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 mongo_client = None
 events_collection = None
 
 
-@app.on_event("startup")
-def startup_event():
+# =========================================================
+# 서버 시작 / 종료 함수
+# main.py에서 호출함
+# =========================================================
+
+def startup_fall_dashboard():
     """
-    서버 시작 시 MongoDB 연결을 시도합니다.
-    MongoDB가 꺼져 있어도 예측 API 자체는 동작합니다.
+    main.py의 startup_event에서 호출됩니다.
+    MongoDB 연결과 낙상 모델 경로 확인을 수행합니다.
     """
-    global mongo_client, events_collection
+    global mongo_client
+    global events_collection
 
     try:
         mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=1500)
@@ -86,31 +106,82 @@ def startup_event():
         mongo_client = None
         events_collection = None
         print(f"[MongoDB] 연결 실패: {e}")
-        print("[MongoDB] 저장 기능 없이 예측 API만 동작합니다.")
+        print("[MongoDB] 저장 기능 없이 낙상 예측 API만 동작합니다.")
+
+    try:
+        model_path, meta_path = find_model_and_meta_paths(raise_if_missing=False)
+
+        if model_path is not None:
+            print(f"[FALL MODEL] 사용 모델: {model_path}")
+        else:
+            print("[FALL MODEL] 사용 가능한 낙상 모델 파일을 찾지 못했습니다.")
+
+        if meta_path is not None:
+            print(f"[FALL MODEL] 메타 파일: {meta_path}")
+        else:
+            print("[FALL MODEL] 메타 파일 없음. 모델 속성 또는 feature_extractor 기준으로 동작합니다.")
+
+    except Exception as e:
+        print(f"[FALL MODEL] 모델 확인 중 오류: {e}")
 
 
-@app.on_event("shutdown")
-def shutdown_event():
+def shutdown_fall_dashboard():
+    """
+    main.py의 shutdown_event에서 호출됩니다.
+    """
     global mongo_client
 
     if mongo_client is not None:
         mongo_client.close()
+        print("[MongoDB] 연결 종료")
+
+
+# =========================================================
+# 모델 로딩 함수
+# =========================================================
+
+def find_model_and_meta_paths(raise_if_missing: bool = True):
+    """
+    사용할 낙상 모델 파일과 메타 파일을 찾습니다.
+    우선 루트 models 폴더에서 SMOTE 모델을 찾고,
+    없으면 기존 모델을 찾습니다.
+    """
+    for model_path in MODEL_CANDIDATES:
+        if model_path.exists():
+            meta_path = model_path.with_name(f"{model_path.stem}_meta.json")
+
+            if meta_path.exists():
+                return model_path, meta_path
+
+            return model_path, None
+
+    if raise_if_missing:
+        checked_paths = "\n".join(str(p) for p in MODEL_CANDIDATES)
+        raise FileNotFoundError(
+            "낙상 모델 파일을 찾을 수 없습니다.\n"
+            "아래 경로 중 하나에 모델 파일이 있어야 합니다.\n\n"
+            f"{checked_paths}"
+        )
+
+    return None, None
 
 
 def load_model_and_meta():
     """
-    학습된 RandomForest 모델과 메타 정보를 불러옵니다.
+    학습된 RandomForest 또는 SMOTE Pipeline 모델과 메타 정보를 불러옵니다.
     """
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(f"모델 파일이 없습니다. 먼저 학습하세요: {MODEL_PATH}")
+    model_path, meta_path = find_model_and_meta_paths(raise_if_missing=True)
 
-    if not META_PATH.exists():
-        raise FileNotFoundError(f"모델 메타 파일이 없습니다: {META_PATH}")
+    model = joblib.load(model_path)
 
-    model = joblib.load(MODEL_PATH)
+    meta = {}
 
-    with open(META_PATH, "r", encoding="utf-8") as f:
-        meta = json.load(f)
+    if meta_path is not None and meta_path.exists():
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+
+    meta["_loaded_model_path"] = str(model_path)
+    meta["_loaded_meta_path"] = str(meta_path) if meta_path is not None else None
 
     return model, meta
 
@@ -118,19 +189,49 @@ def load_model_and_meta():
 def get_feature_names(model, meta: dict, feat: dict) -> list[str]:
     """
     학습 때 사용한 feature 순서를 가져옵니다.
+
     우선순위:
-    1. meta["feature_names"]
-    2. model.feature_names_in_
-    3. 현재 추출된 feature 이름
+    1. meta["feature_columns"]
+    2. meta["feature_names"]
+    3. model.feature_columns_
+    4. model.feature_names_in_
+    5. 현재 추출된 feature 이름
     """
+    if meta and "feature_columns" in meta:
+        return list(meta["feature_columns"])
+
     if meta and "feature_names" in meta:
         return list(meta["feature_names"])
+
+    if hasattr(model, "feature_columns_"):
+        return list(model.feature_columns_)
 
     if hasattr(model, "feature_names_in_"):
         return list(model.feature_names_in_)
 
     return sorted(feat.keys())
 
+
+def get_model_threshold(model, meta: dict) -> float:
+    """
+    학습 때 저장한 best threshold를 가져옵니다.
+    없으면 기본값 0.5를 사용합니다.
+    """
+    if meta and "best_threshold" in meta:
+        return float(meta["best_threshold"])
+
+    if meta and "threshold" in meta:
+        return float(meta["threshold"])
+
+    if hasattr(model, "threshold_"):
+        return float(model.threshold_)
+
+    return 0.5
+
+
+# =========================================================
+# 프론트 표시용 센서 설명
+# =========================================================
 
 def build_sensor_feature_table(feat: dict) -> list[dict]:
     """
@@ -177,6 +278,10 @@ def build_sensor_feature_table(feat: dict) -> list[dict]:
 
     return rows
 
+
+# =========================================================
+# MongoDB 저장 함수
+# =========================================================
 
 def save_event_to_mongodb(event: dict) -> dict:
     """
@@ -230,25 +335,31 @@ def serialize_mongo_doc(doc: dict) -> dict:
     return doc
 
 
-@app.get("/")
-def root():
+# =========================================================
+# 낙상 상태 확인 API
+# =========================================================
+
+@router.get("/health")
+def health():
+    model_path, meta_path = find_model_and_meta_paths(raise_if_missing=False)
+
     return {
-        "service": "Smart Care AI mmWave Fall Detection API",
-        "status": "running",
-        "model_exists": MODEL_PATH.exists(),
-        "meta_exists": META_PATH.exists(),
+        "status": "ok",
+        "api": "fall-running",
+        "model_exists": model_path is not None,
+        "meta_exists": meta_path is not None,
         "mongo_connected": events_collection is not None,
-        "mongo_db": MONGO_DB_NAME,
-        "mongo_collection": MONGO_COLLECTION_NAME,
-        "root_dir": str(ROOT_DIR),
-        "rf_dir": str(RF_DIR),
-        "model_path": str(MODEL_PATH),
-        "meta_path": str(META_PATH),
-        "db_policy": "Only Fall Alert is saved. Exception and Normal are not saved.",
+        "model_path": str(model_path) if model_path is not None else None,
+        "meta_path": str(meta_path) if meta_path is not None else None,
+        "model_dir": str(MODEL_DIR),
     }
 
 
-@app.post("/predict")
+# =========================================================
+# 낙상 예측 API
+# =========================================================
+
+@router.post("/predict")
 async def predict(file: UploadFile = File(...)):
     """
     CSV 파일 업로드
@@ -289,28 +400,29 @@ async def predict(file: UploadFile = File(...)):
         X = X[feature_names].fillna(0.0)
 
         # 3. Fall 확률 계산
-        # predict_csv.py에 있는 get_fall_probability를 사용해서
-        # 모델 클래스 순서가 바뀌어도 Fall 확률을 안전하게 가져옵니다.
         fall_prob, pred_label = get_fall_probability(model, X)
 
-        # 4. 후처리
-        # 중요:
-        # postprocess_fall_result는 speed_max, height_drop을 따로 받지 않고
-        # features=feat 안에서 직접 꺼내 쓰는 함수입니다.
+        # 4. threshold 정보
+        model_threshold = get_model_threshold(model, meta)
+        threshold_pred_label = "Fall" if float(fall_prob) >= model_threshold else "Normal"
+
+        # 5. 후처리
         result = postprocess_fall_result(
             fall_prob=fall_prob,
             features=feat,
             file_name=file.filename,
         )
 
-        # 5. 프론트 표시용 값 추가
-        # result 안에 이미 fall_prob, speed_max, height_drop, movement_after가 들어있으므로
-        # 여기서 fall_prob를 raw 모델 확률로 덮어쓰면 안 됩니다.
+        # 6. 프론트 표시용 값 추가
         result.update(
             {
                 "file_name": file.filename,
                 "raw_model_fall_prob": round(float(fall_prob), 4),
                 "model_pred_label": str(pred_label),
+                "model_threshold": round(float(model_threshold), 4),
+                "threshold_pred_label": threshold_pred_label,
+                "loaded_model_path": meta.get("_loaded_model_path"),
+                "loaded_meta_path": meta.get("_loaded_meta_path"),
                 "sensor_features": result.get(
                     "sensor_features",
                     build_sensor_feature_table(feat),
@@ -319,7 +431,7 @@ async def predict(file: UploadFile = File(...)):
             }
         )
 
-        # 6. Fall Alert일 때만 MongoDB 저장
+        # 7. Fall Alert일 때만 MongoDB 저장
         db_result = save_event_to_mongodb(result)
         result.update(db_result)
 
@@ -341,7 +453,11 @@ async def predict(file: UploadFile = File(...)):
                 pass
 
 
-@app.get("/events")
+# =========================================================
+# 낙상 이벤트 조회 API
+# =========================================================
+
+@router.get("/events")
 def get_events(limit: int = 30):
     """
     MongoDB에 저장된 Fall Alert 이벤트 목록 조회.
@@ -371,7 +487,7 @@ def get_events(limit: int = 30):
     }
 
 
-@app.get("/stats")
+@router.get("/stats")
 def get_stats():
     """
     대시보드 카드용 통계.
@@ -396,10 +512,10 @@ def get_stats():
     }
 
 
-@app.delete("/events")
+@router.delete("/events")
 def delete_all_events():
     """
-    테스트 중 쌓인 이벤트를 전체 삭제합니다.
+    테스트 중 쌓인 낙상 이벤트를 전체 삭제합니다.
     """
     if events_collection is None:
         return {

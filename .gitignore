@@ -1,15 +1,26 @@
-
-# VS Code
-.vscode/
-
-# React / Node
-frontend/node_modules/
-frontend/dist/
-frontend/build/
-frontend/.env
-frontend/.env.local
-
-# Python cache
+# Python
 __pycache__/
 *.pyc
-rf/__pycache__/
+.venv/
+venv/
+env/
+
+# Node / React
+node_modules/
+dist/
+build/
+
+# Env
+.env
+.env.local
+
+# Data / Large files
+data/
+*.csv
+*.npy
+*.joblib
+
+# OS / Editor
+.vscode/
+.DS_Store
+Thumbs.db

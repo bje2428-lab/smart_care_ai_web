@@ -9,7 +9,7 @@ import {
 
 import Home from "./pages/Home";
 import FallDashboard from "./pages/FallDashboard";
-// import AbnormalDashboard from "./pages/AbnormalDashboard";
+import AbnormalDashboard from "./pages/AbnormalDashboard";
 
 import "./App.css";
 
@@ -61,7 +61,7 @@ function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/fall" element={<FallDashboard />} />
-            {/* <Route path="/abnormal" element={<AbnormalDashboard />} /> */}
+            <Route path="/abnormal" element={<AbnormalDashboard />} />
 
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

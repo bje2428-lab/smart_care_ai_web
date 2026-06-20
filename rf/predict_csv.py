@@ -9,11 +9,18 @@ except ModuleNotFoundError:
     from feature_extractor import extract_features_from_csv
 
 
+# =========================
+# 모델 경로 후보
+# =========================
+# 루트 models 폴더의 SMOTE 모델을 가장 먼저 사용
 MODEL_CANDIDATES = [
-    Path("models/mmwave_rf_aug_model.pkl"),
+    Path("models/mmwave_rf_smote_model.pkl"),
     Path("models/mmwave_rf_model.pkl"),
-    Path("rf/models/mmwave_rf_aug_model.pkl"),
+    Path("models/mmwave_rf_aug_model.pkl"),
+
+    Path("rf/models/mmwave_rf_smote_model.pkl"),
     Path("rf/models/mmwave_rf_model.pkl"),
+    Path("rf/models/mmwave_rf_aug_model.pkl"),
 ]
 
 
@@ -22,8 +29,11 @@ def find_model_path() -> Path:
         if path.exists():
             return path
 
+    checked = "\n".join(str(p) for p in MODEL_CANDIDATES)
     raise FileNotFoundError(
-        "모델 파일을 찾을 수 없습니다. models 폴더 안에 .pkl 파일이 있는지 확인하세요."
+        "모델 파일을 찾을 수 없습니다.\n"
+        "아래 경로 중 하나에 .pkl 파일이 있는지 확인하세요.\n\n"
+        f"{checked}"
     )
 
 
@@ -45,7 +55,12 @@ def load_model_bundle():
         return model, feature_columns, model_path
 
     model = loaded
-    feature_columns = getattr(model, "feature_names_in_", None)
+
+    # SMOTE 학습 코드에서 저장한 feature_columns_ 우선 사용
+    feature_columns = getattr(model, "feature_columns_", None)
+
+    if feature_columns is None:
+        feature_columns = getattr(model, "feature_names_in_", None)
 
     if feature_columns is not None:
         feature_columns = list(feature_columns)
@@ -132,10 +147,11 @@ def postprocess_fall_result(
     모델 확률 + 규칙 기반 후처리.
 
     핵심:
-    - 모델 확률이 높으면 Fall로 신뢰
-    - height_drop만 보고 Fall 처리하지 않음
-    - 단, Towsif_back_2 / Towsif_back_5처럼
-      fall_prob는 낮지만 height_drop이 크고 speed 변화가 있는 실제 낙상은 Fall로 보정
+    - 모델 확률이 높으면 Fall로 판단
+    - height_drop만 보고 무조건 Fall 처리하지 않음
+    - fall_prob만 보고 단독으로 Fall Alert 처리하지 않음
+    - Towsif_back_5.csv처럼 애매한 Fall은
+      확률 + 높이 변화 + 속도 변화가 함께 있을 때만 보정
     """
 
     fall_prob = float(fall_prob)
@@ -188,41 +204,82 @@ def postprocess_fall_result(
     if fall_prob >= 0.50 and effective_height_drop >= 0.35:
         fall_reasons.append("모델 확률과 높이 변화를 종합해 낙상으로 판단했습니다.")
 
-    # 모델 확률은 낮지만, 높이 변화와 순간 속도가 모두 큰 경우
-    if fall_prob >= 0.20 and effective_height_drop >= 0.70 and speed_max >= 0.80:
-        fall_reasons.append("높이 변화와 순간 속도 변화가 함께 커서 낙상으로 판단했습니다.")
+    # 중요:
+    # 아래처럼 fall_prob만 보는 조건은 제거함.
+    # if fall_prob >= 0.42:
+    #     fall_reasons.append("모델 낙상 확률이 보정 기준 이상으로 감지되어 낙상으로 판단했습니다.")
+    #
+    # 이유:
+    # Raffay_walk_2.csv 같은 정상 행동도 raw_model_prob가 0.4343으로 나와서
+    # 확률만 보면 Fall Alert로 오탐됨.
 
-    # 추가 조건:
-    # Towsif_back_2, Towsif_back_5처럼
-    # 모델 확률은 낮지만 높이 변화가 매우 크고 speed 변화가 어느 정도 있는 실제 낙상 보정
+    # Towsif_back_5.csv 같은 애매한 실제 낙상 보정
+    # 단, 확률만 보지 않고 높이 변화 + 속도 변화까지 같이 확인
     if (
-        fall_prob >= 0.20
-        and effective_height_drop >= 0.75
+        fall_prob >= 0.425
+        and effective_height_drop >= 0.35
+        and speed_max >= 0.25
+        and movement_after <= 0.60
+    ):
+        fall_reasons.append(
+            "모델 확률은 낮지만 높이 변화와 속도 변화가 함께 감지되어 낙상으로 보정했습니다."
+        )
+
+    # 모델 확률은 낮지만, 높이 변화와 순간 속도가 모두 큰 경우
+    if (
+        fall_prob >= 0.40
+        and effective_height_drop >= 0.70
         and speed_max >= 0.30
         and movement_after <= 0.60
     ):
-        fall_reasons.append("높이 변화가 매우 크고 속도 변화가 감지되어 실제 낙상으로 보정했습니다.")
+        fall_reasons.append("높이 변화와 순간 속도 변화가 함께 커서 낙상으로 판단했습니다.")
 
-    # 높이 변화가 있고, 이후 움직임이 거의 없으며, 모델 확률도 어느 정도 있는 경우
-    if fall_prob >= 0.30 and effective_height_drop >= 0.55 and movement_after <= 0.25:
-        fall_reasons.append("낙상 후 움직임이 거의 없어 낙상 가능성이 높습니다.")
+    # 낙상 후 움직임이 거의 없는 경우
+    # 기존 조건은 너무 넓어서 Normal squat, walk까지 Fall로 잡을 수 있어서 강화
+    if (
+        fall_prob >= 0.45
+        and effective_height_drop >= 0.65
+        and speed_max >= 0.40
+        and movement_after <= 0.25
+    ):
+        fall_reasons.append("높이 변화와 속도 변화가 있고 이후 움직임이 적어 낙상 가능성이 높습니다.")
 
     if fall_reasons:
         adjusted_prob = fall_prob
 
         if fall_prob >= 0.80:
             adjusted_prob = max(adjusted_prob, 0.90)
+
         elif fall_prob >= 0.65:
             adjusted_prob = max(adjusted_prob, 0.80)
+
         elif fall_prob >= 0.50:
             adjusted_prob = max(adjusted_prob, 0.75)
+
         elif (
-            fall_prob >= 0.20
-            and effective_height_drop >= 0.75
+            fall_prob >= 0.425
+            and effective_height_drop >= 0.35
+            and speed_max >= 0.25
+            and movement_after <= 0.60
+        ):
+            adjusted_prob = max(adjusted_prob, 0.70)
+
+        elif (
+            fall_prob >= 0.40
+            and effective_height_drop >= 0.70
             and speed_max >= 0.30
             and movement_after <= 0.60
         ):
             adjusted_prob = max(adjusted_prob, 0.72)
+
+        elif (
+            fall_prob >= 0.45
+            and effective_height_drop >= 0.65
+            and speed_max >= 0.40
+            and movement_after <= 0.25
+        ):
+            adjusted_prob = max(adjusted_prob, 0.68)
+
         else:
             adjusted_prob = max(adjusted_prob, 0.65)
 
@@ -305,12 +362,15 @@ def predict_csv(csv_path: str | Path) -> dict:
     features = extract_features_from_csv(csv_path)
 
     if feature_columns is None:
-        if hasattr(model, "feature_names_in_"):
+        if hasattr(model, "feature_columns_"):
+            feature_columns = list(model.feature_columns_)
+        elif hasattr(model, "feature_names_in_"):
             feature_columns = list(model.feature_names_in_)
         else:
             feature_columns = sorted(features.keys())
 
     row = {}
+
     for col in feature_columns:
         row[col] = features.get(col, 0.0)
 
@@ -339,7 +399,7 @@ def main():
     if not args.csv_path:
         print("CSV 파일 경로를 입력하세요.")
         print("예시:")
-        print("py -m rf.predict_csv data/sample.csv")
+        print("python -m rf.predict_csv data/sample.csv")
         return
 
     result = predict_csv(args.csv_path)

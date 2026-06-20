@@ -1,0 +1,830 @@
+/* =========================================================
+   AbnormalDashboard.css
+   JSX 변경 없이 사용하는 최종 버전
+
+   구조:
+   상단: 헤더 + 요약 카드
+   중간: 왼쪽 CSV 업로드 / 오른쪽 최근 기록
+   하단: 왼쪽 예측 결과 / 오른쪽 빈 공간
+
+   수정:
+   - 페이지 좌우 여백 줄임
+   - 왼쪽 CSV / 오른쪽 기록 2열 유지
+   - 최근 기록 5개씩 페이징
+   - 기록 테이블 스크롤 제거
+   - CSV 박스 아래와 예측 결과 사이 공백 줄임
+========================================================= */
+
+.abnormal-page {
+    width: min(1680px, calc(100vw - 28px));
+    min-height: 100vh;
+    margin: 0 auto;
+    padding: 16px 0 60px;
+    background: #f4f7fb;
+    color: #061126;
+    box-sizing: border-box;
+  }
+  
+  /* =========================================================
+     Hero
+  ========================================================= */
+  
+  .abnormal-hero {
+    width: 100%;
+    min-height: 150px;
+    padding: 42px;
+    margin-bottom: 26px;
+    border-radius: 30px;
+    background: linear-gradient(135deg, #2847a8 0%, #2563eb 50%, #38bdf8 100%);
+    color: #ffffff;
+    box-shadow: 0 24px 56px rgba(37, 99, 235, 0.22);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    box-sizing: border-box;
+  }
+  
+  .abnormal-eyebrow {
+    margin: 0 0 12px;
+    color: rgba(255, 255, 255, 0.86);
+    font-size: 14px;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+  }
+  
+  .abnormal-hero h1 {
+    margin: 0;
+    color: #ffffff;
+    font-size: 38px;
+    font-weight: 950;
+    letter-spacing: -0.05em;
+    line-height: 1.15;
+  }
+  
+  .abnormal-hero-desc {
+    margin: 14px 0 0;
+    max-width: 820px;
+    color: rgba(255, 255, 255, 0.84);
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1.65;
+  }
+  
+  .abnormal-api-badge {
+    min-width: fit-content;
+    height: 52px;
+    padding: 0 22px;
+    border-radius: 18px;
+    background: #ffffff;
+    color: #28406b;
+    font-size: 14px;
+    font-weight: 900;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.14);
+    white-space: nowrap;
+  }
+  
+  .abnormal-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: #16a34a;
+  }
+  
+  /* =========================================================
+     Alert / Loading / Empty
+  ========================================================= */
+  
+  .abnormal-alert {
+    width: 100%;
+    margin-bottom: 20px;
+    padding: 20px 22px;
+    border-radius: 22px;
+    font-size: 15px;
+    font-weight: 800;
+    line-height: 1.6;
+    box-sizing: border-box;
+  }
+  
+  .abnormal-alert.error {
+    color: #ef4444;
+    background: #fff1f1;
+    border: 1px solid #ffcaca;
+  }
+  
+  .abnormal-loading,
+  .abnormal-empty {
+    width: 100%;
+    min-height: 86px;
+    padding: 24px;
+    border-radius: 18px;
+    background: #f8fafc;
+    border: 1px dashed #d7e0ee;
+    color: #667794;
+    font-size: 15px;
+    font-weight: 800;
+    line-height: 1.7;
+    text-align: center;
+    display: grid;
+    place-items: center;
+    box-sizing: border-box;
+  }
+  
+  /* =========================================================
+     Summary Cards
+  ========================================================= */
+  
+  .abnormal-summary-grid {
+    display: grid;
+    grid-template-columns: 2.4fr 1fr 1fr 1fr;
+    gap: 18px;
+    margin-bottom: 24px;
+  }
+  
+  .abnormal-summary-card {
+    min-height: 150px;
+    padding: 26px;
+    border-radius: 24px;
+    background: #ffffff;
+    border: 1px solid #dfe7f3;
+    box-shadow: 0 18px 36px rgba(15, 23, 42, 0.06);
+    box-sizing: border-box;
+  }
+  
+  .abnormal-summary-card p {
+    margin: 0 0 14px;
+    color: #667794;
+    font-size: 15px;
+    font-weight: 900;
+  }
+  
+  .abnormal-summary-card strong {
+    display: block;
+    margin-bottom: 12px;
+    color: #061126;
+    font-size: 30px;
+    font-weight: 950;
+    letter-spacing: -0.04em;
+  }
+  
+  .abnormal-summary-card span {
+    display: block;
+    color: #667794;
+    font-size: 14px;
+    font-weight: 700;
+  }
+  
+  .abnormal-summary-card.danger-soft {
+    background: #fff1f1;
+    border-color: #ffcaca;
+  }
+  
+  .abnormal-summary-card.danger-soft p,
+  .abnormal-summary-card.danger-soft strong {
+    color: #be123c;
+  }
+  
+  /* =========================================================
+     Common Panel
+  ========================================================= */
+  
+  .abnormal-panel {
+    width: 100%;
+    padding: 28px 30px;
+    border-radius: 24px;
+    background: #ffffff;
+    border: 1px solid #dfe7f3;
+    box-shadow: 0 18px 36px rgba(15, 23, 42, 0.06);
+    box-sizing: border-box;
+  }
+  
+  .abnormal-panel-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 24px;
+  }
+  
+  .abnormal-panel-header h2 {
+    margin: 0;
+    color: #061126;
+    font-size: 25px;
+    font-weight: 950;
+    letter-spacing: -0.04em;
+  }
+  
+  .abnormal-panel-header p {
+    margin: 10px 0 0;
+    color: #667794;
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1.6;
+  }
+  
+  /* =========================================================
+     Middle Grid
+     왼쪽 CSV 업로드 / 오른쪽 최근 기록
+  ========================================================= */
+  
+  .abnormal-middle-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(420px, 0.85fr);
+    gap: 24px;
+    margin-bottom: 18px;
+    align-items: start;
+  }
+  
+  /* =========================================================
+     Upload Box
+  ========================================================= */
+  
+  .abnormal-upload-panel {
+    align-self: start;
+    height: auto;
+    min-height: 0;
+    margin-bottom: 0;
+  }
+  
+  .abnormal-upload-box {
+    padding: 24px;
+    border-radius: 20px;
+    background: #fbfcff;
+    border: 2px dashed #c9d7ea;
+  }
+  
+  .abnormal-file-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  
+  .abnormal-file-row input {
+    flex: 1;
+    color: #061126;
+    font-weight: 800;
+  }
+  
+  .abnormal-upload-help {
+    margin: 0 0 16px;
+    color: #667794;
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.7;
+    word-break: break-all;
+  }
+  
+  .abnormal-sim-status {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  
+  .abnormal-sim-status div {
+    padding: 16px;
+    border-radius: 16px;
+    background: #f8fafc;
+    border: 1px solid #e5ebf5;
+  }
+  
+  .abnormal-sim-status span {
+    display: block;
+    margin-bottom: 8px;
+    color: #667794;
+    font-size: 13px;
+    font-weight: 900;
+  }
+  
+  .abnormal-sim-status strong {
+    display: block;
+    color: #061126;
+    font-size: 15px;
+    font-weight: 950;
+    word-break: break-all;
+  }
+  
+  .abnormal-action-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 220px;
+    gap: 12px;
+  }
+  
+  /* =========================================================
+     Buttons
+  ========================================================= */
+  
+  .abnormal-primary-btn,
+  .abnormal-ghost-btn,
+  .abnormal-danger-btn {
+    height: 46px;
+    padding: 0 20px;
+    border: 0;
+    border-radius: 15px;
+    font-size: 14px;
+    font-weight: 900;
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+  }
+  
+  .abnormal-primary-btn:hover,
+  .abnormal-ghost-btn:hover,
+  .abnormal-danger-btn:hover {
+    transform: translateY(-1px);
+  }
+  
+  .abnormal-primary-btn {
+    color: #ffffff;
+    background: linear-gradient(135deg, #2f6bff 0%, #1d4ed8 100%);
+    box-shadow: 0 10px 20px rgba(37, 99, 235, 0.24);
+  }
+  
+  .abnormal-primary-btn.full {
+    width: 100%;
+  }
+  
+  .abnormal-primary-btn:disabled,
+  .abnormal-ghost-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+  }
+  
+  .abnormal-ghost-btn {
+    background: #eef4ff;
+    color: #1d4ed8;
+  }
+  
+  .abnormal-danger-btn {
+    background: #fff1f1;
+    color: #dc2626;
+  }
+  
+  .abnormal-button-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  
+  /* =========================================================
+     History Table
+     5개씩 페이징, 내부 스크롤 제거
+  ========================================================= */
+  
+  .abnormal-history-panel {
+    align-self: start;
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
+  }
+  
+  .abnormal-table-wrap,
+  .abnormal-history-table-wrap {
+    width: 100%;
+    max-height: none;
+    overflow: visible;
+    border: 1px solid #dfe7f3;
+    border-radius: 18px;
+    background: #ffffff;
+  }
+  
+  .abnormal-table {
+    width: 100%;
+    min-width: 0;
+    table-layout: fixed;
+    border-collapse: collapse;
+  }
+  
+  .abnormal-table th,
+  .abnormal-table td {
+    padding: 14px 12px;
+    border-bottom: 1px solid #e5ebf5;
+    text-align: left;
+    font-size: 14px;
+    vertical-align: middle;
+    white-space: normal;
+    word-break: keep-all;
+    overflow-wrap: break-word;
+  }
+  
+  .abnormal-table th {
+    color: #667794;
+    background: #f8fafc;
+    font-weight: 950;
+  }
+  
+  .abnormal-table td {
+    color: #334155;
+    font-weight: 800;
+    line-height: 1.45;
+  }
+  
+  .abnormal-table tbody tr:last-child td {
+    border-bottom: none;
+  }
+  
+  .abnormal-click-row {
+    cursor: pointer;
+  }
+  
+  .abnormal-click-row:hover {
+    background: #f1f5fb;
+  }
+  
+  .abnormal-history-panel .abnormal-table th:nth-child(1),
+  .abnormal-history-panel .abnormal-table td:nth-child(1) {
+    width: 25%;
+  }
+  
+  .abnormal-history-panel .abnormal-table th:nth-child(2),
+  .abnormal-history-panel .abnormal-table td:nth-child(2) {
+    width: 15%;
+    text-align: center;
+  }
+  
+  .abnormal-history-panel .abnormal-table th:nth-child(3),
+  .abnormal-history-panel .abnormal-table td:nth-child(3) {
+    width: 12%;
+    text-align: center;
+  }
+  
+  .abnormal-history-panel .abnormal-table th:nth-child(4),
+  .abnormal-history-panel .abnormal-table td:nth-child(4) {
+    width: 33%;
+  }
+  
+  .abnormal-history-panel .abnormal-table th:nth-child(5),
+  .abnormal-history-panel .abnormal-table td:nth-child(5) {
+    width: 15%;
+    text-align: center;
+  }
+  
+  .abnormal-history-panel .abnormal-table tbody tr {
+    height: 74px;
+  }
+  
+  .abnormal-history-panel * {
+    scrollbar-width: none;
+  }
+  
+  .abnormal-history-panel *::-webkit-scrollbar {
+    display: none;
+  }
+  
+  /* =========================================================
+     Pagination
+  ========================================================= */
+  
+  .abnormal-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    margin-top: 18px;
+  }
+  
+  .abnormal-pagination button {
+    width: 42px;
+    height: 38px;
+    border: 0;
+    border-radius: 14px;
+    background: #eef4ff;
+    color: #2563eb;
+    font-size: 16px;
+    font-weight: 950;
+    cursor: pointer;
+  }
+  
+  .abnormal-pagination button:hover {
+    background: #dbeafe;
+  }
+  
+  .abnormal-pagination button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  
+  .abnormal-pagination strong {
+    min-width: 54px;
+    text-align: center;
+    color: #061126;
+    font-size: 15px;
+    font-weight: 950;
+  }
+  
+  /* =========================================================
+     Result Row
+     하단 왼쪽 예측 결과 / 오른쪽 빈 공간
+     표시한 공백을 줄이기 위해 데스크톱에서 위로 당김
+  ========================================================= */
+  
+  .abnormal-result-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(420px, 0.85fr);
+    gap: 24px;
+    margin-top: -150px;
+    margin-bottom: 24px;
+    align-items: start;
+    pointer-events: none;
+  }
+  
+  .abnormal-result-panel {
+    width: 100%;
+    align-self: start;
+    pointer-events: auto;
+  }
+  
+  .abnormal-result-empty-right {
+    min-height: 1px;
+    pointer-events: none;
+  }
+  
+  .abnormal-result-layout {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  
+  .abnormal-result-score-card {
+    padding: 24px;
+    border-radius: 22px;
+    background: #f8fafc;
+    border: 1px solid #dfe7f3;
+  }
+  
+  .abnormal-state-badge,
+  .abnormal-mini-state {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    font-weight: 950;
+  }
+  
+  .abnormal-state-badge {
+    padding: 10px 16px;
+    margin-bottom: 20px;
+    font-size: 14px;
+  }
+  
+  .abnormal-mini-state {
+    min-width: 58px;
+    padding: 7px 11px;
+    font-size: 12px;
+  }
+  
+  .abnormal-state-badge.danger,
+  .abnormal-mini-state.danger {
+    background: #fff1f1;
+    color: #dc2626;
+  }
+  
+  .abnormal-state-badge.warning,
+  .abnormal-mini-state.warning {
+    background: #fff7e6;
+    color: #d97706;
+  }
+  
+  .abnormal-state-badge.outing,
+  .abnormal-mini-state.outing {
+    background: #f5f0ff;
+    color: #7c3aed;
+  }
+  
+  .abnormal-state-badge.meal,
+  .abnormal-mini-state.meal {
+    background: #ecfdf3;
+    color: #16a34a;
+  }
+  
+  .abnormal-state-badge.sleep,
+  .abnormal-mini-state.sleep {
+    background: #eef2ff;
+    color: #4f46e5;
+  }
+  
+  .abnormal-state-badge.normal,
+  .abnormal-mini-state.normal {
+    background: #eef4ff;
+    color: #2563eb;
+  }
+  
+  .abnormal-risk-score-wrap {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 14px;
+  }
+  
+  .abnormal-risk-score {
+    color: #061126;
+    font-size: 52px;
+    font-weight: 950;
+    letter-spacing: -0.07em;
+    line-height: 1;
+  }
+  
+  .abnormal-risk-score span {
+    margin-left: 6px;
+    color: #667794;
+    font-size: 17px;
+    font-weight: 900;
+  }
+  
+  .abnormal-risk-score-wrap p {
+    margin: 0;
+    color: #667794;
+    font-size: 15px;
+    font-weight: 900;
+  }
+  
+  .abnormal-risk-meter {
+    width: 100%;
+    height: 13px;
+    margin-bottom: 20px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: #e8edf5;
+  }
+  
+  .abnormal-risk-meter-fill {
+    height: 100%;
+    border-radius: 999px;
+  }
+  
+  .abnormal-risk-meter-fill.danger {
+    background: linear-gradient(90deg, #fb7185, #dc2626);
+  }
+  
+  .abnormal-risk-meter-fill.warning {
+    background: linear-gradient(90deg, #fbbf24, #f59e0b);
+  }
+  
+  .abnormal-risk-meter-fill.outing {
+    background: linear-gradient(90deg, #a78bfa, #7c3aed);
+  }
+  
+  .abnormal-risk-meter-fill.meal {
+    background: linear-gradient(90deg, #4ade80, #16a34a);
+  }
+  
+  .abnormal-risk-meter-fill.sleep {
+    background: linear-gradient(90deg, #818cf8, #4f46e5);
+  }
+  
+  .abnormal-risk-meter-fill.normal {
+    background: linear-gradient(90deg, #60a5fa, #2563eb);
+  }
+  
+  .abnormal-result-list {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  
+  .abnormal-result-list div {
+    min-height: 58px;
+    padding: 14px 16px;
+    border-radius: 15px;
+    background: #f8fafc;
+    border: 1px solid #e5ebf5;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  
+  .abnormal-result-list span {
+    color: #667794;
+    font-size: 13px;
+    font-weight: 900;
+  }
+  
+  .abnormal-result-list strong {
+    color: #061126;
+    font-size: 15px;
+    font-weight: 900;
+    word-break: keep-all;
+  }
+  
+  .abnormal-guardian-message {
+    margin: 16px 0 0;
+    padding: 15px 16px;
+    border-radius: 15px;
+    background: #ffffff;
+    border: 1px solid #e5ebf5;
+    color: #52627c;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.6;
+  }
+  
+  /* =========================================================
+     Responsive
+  ========================================================= */
+  
+  @media (max-width: 1280px) {
+    .abnormal-page {
+      width: calc(100vw - 24px);
+    }
+  
+    .abnormal-summary-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  
+    .abnormal-middle-grid {
+      grid-template-columns: minmax(0, 1.15fr) minmax(390px, 0.85fr);
+    }
+  
+    .abnormal-result-row {
+      grid-template-columns: minmax(0, 1.15fr) minmax(390px, 0.85fr);
+      margin-top: -130px;
+    }
+  
+    .abnormal-sim-status {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  
+    .abnormal-action-row {
+      grid-template-columns: 1fr;
+    }
+  }
+  
+  @media (max-width: 900px) {
+    .abnormal-page {
+      width: calc(100vw - 18px);
+      padding: 12px 0 48px;
+    }
+  
+    .abnormal-hero {
+      padding: 30px;
+      flex-direction: column;
+      align-items: flex-start;
+    }
+  
+    .abnormal-hero h1 {
+      font-size: 30px;
+    }
+  
+    .abnormal-api-badge {
+      width: 100%;
+      justify-content: center;
+    }
+  
+    .abnormal-panel-header {
+      flex-direction: column;
+    }
+  
+    .abnormal-file-row {
+      flex-direction: column;
+      align-items: stretch;
+    }
+  
+    .abnormal-button-row {
+      width: 100%;
+    }
+  
+    .abnormal-button-row button {
+      flex: 1;
+    }
+  
+    .abnormal-middle-grid,
+    .abnormal-result-row {
+      grid-template-columns: 1fr;
+    }
+  
+    .abnormal-result-row {
+      margin-top: 18px;
+      pointer-events: auto;
+    }
+  
+    .abnormal-result-empty-right {
+      display: none;
+    }
+  
+    .abnormal-sim-status {
+      grid-template-columns: 1fr;
+    }
+  }
+  
+  @media (max-width: 640px) {
+    .abnormal-summary-grid,
+    .abnormal-sim-status,
+    .abnormal-result-list {
+      grid-template-columns: 1fr;
+    }
+  
+    .abnormal-panel {
+      padding: 22px;
+    }
+  
+    .abnormal-risk-score {
+      font-size: 44px;
+    }
+  }

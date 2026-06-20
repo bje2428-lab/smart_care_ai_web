@@ -3,8 +3,16 @@ import sys
 import json
 import joblib
 import pandas as pd
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=".*sklearn.utils.parallel.delayed.*",
+    category=UserWarning,
+)
 
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+
 
 
 # =========================
