@@ -13,6 +13,7 @@ const API_URLS = (
   .filter(Boolean);
 
 const EVENT_PAGE_SIZE = 5;
+const FALL_REQUIRED_FEATURE_COUNT = 8;
 
 let activeApiBaseUrl = null;
 
@@ -27,7 +28,7 @@ async function getActiveApiBaseUrl() {
 
   for (const url of API_URLS) {
     try {
-      const res = await axios.get(`${url}/`, { timeout: 2000 });
+      const res = await axios.get(`${url}/health`, { timeout: 2000 });
 
       if (res.status === 200) {
         activeApiBaseUrl = url;
@@ -35,7 +36,7 @@ async function getActiveApiBaseUrl() {
         return activeApiBaseUrl;
       }
     } catch (err) {
-      console.log(`${url} 연결 실패`);
+      console.log(`${url} 연결 실패`, err);
     }
   }
 
@@ -66,53 +67,8 @@ async function apiDelete(path) {
   return axios.delete(`${baseUrl}${path}`);
 }
 
-function getEventId(event) {
-  return String(event?._id || event?.id || event?.file_name || "");
-}
-
-function getDisplayStatus(status) {
-  if (status === "Exception") return "Normal";
-  return status || "-";
-}
-
-function getDisplayStatusText(status) {
-  if (status === "Exception") return "Normal";
-  return status || "-";
-}
-
-function getDisplayResultMessage(result) {
-  if (!result) return "";
-
-  if (result.status === "Fall Alert") {
-    return result.message || "낙상 알림으로 판단되었습니다.";
-  }
-
-  return "정상 행동으로 판단되었습니다. 낙상 알림 기준에 도달하지 않아 DB에는 저장하지 않습니다.";
-}
-
-function StatusBadge({ status }) {
-  const displayStatus = getDisplayStatus(status);
-
-  const cls =
-    displayStatus === "Fall Alert"
-      ? "badge danger"
-      : displayStatus === "Normal"
-        ? "badge normal"
-        : "badge";
-
-  return <span className={cls}>{displayStatus}</span>;
-}
-
-function AlertText({ alert }) {
-  return alert ? (
-    <span className="alert-true">알림 발생</span>
-  ) : (
-    <span className="alert-false">알림 없음</span>
-  );
-}
-
 function toSafeNumber(value) {
-  if (value === null || value === undefined) return 0;
+  if (value === null || value === undefined || value === "") return 0;
 
   if (typeof value === "string") {
     const cleaned = value.replace("%", "").trim();
@@ -130,6 +86,192 @@ function toSafeNumber(value) {
 function normalizeProbability(value) {
   const num = toSafeNumber(value);
   return num > 1 ? num / 100 : num;
+}
+
+function getFirstNumber(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== "") {
+      return toSafeNumber(value);
+    }
+  }
+
+  return 0;
+}
+
+function getFromResult(result, keys) {
+  if (!result) return undefined;
+
+  const sources = [
+    result,
+    result.features,
+    result.metrics,
+    result.sensor,
+    result.result,
+    result.data,
+  ];
+
+  for (const source of sources) {
+    if (!source) continue;
+
+    for (const key of keys) {
+      if (source[key] !== undefined && source[key] !== null) {
+        return source[key];
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeFallResult(data, fallbackFileName = "-") {
+  const result = data || {};
+
+  const rawProb = getFromResult(result, [
+    "raw_model_fall_prob",
+    "fall_prob",
+    "fall_probability",
+    "fall_risk",
+    "fall_risk_percent",
+    "risk_score",
+    "probability",
+  ]);
+
+  const fallProb = normalizeProbability(rawProb);
+
+  const speedMax = getFirstNumber(
+    getFromResult(result, [
+      "speed_max",
+      "max_speed",
+      "v_abs_max",
+      "abs_v_max",
+      "v_max_abs",
+      "v_max",
+      "velocity_max",
+    ]),
+  );
+
+  const heightDrop = getFirstNumber(
+    getFromResult(result, [
+      "height_drop",
+      "z_drop",
+      "z_range",
+      "z_center_drop",
+      "z_center_first_to_min_drop",
+      "z_center_peak_to_last_drop",
+      "max_height_drop",
+    ]),
+  );
+
+  const movementAfter = getFirstNumber(
+    getFromResult(result, [
+      "movement_after",
+      "movement_after_fall",
+      "after_movement",
+      "tail_movement",
+      "movement_after_mean",
+      "center_move_tail_mean",
+      "center_move_after",
+    ]),
+  );
+
+  let status =
+    result.status ||
+    result.prediction ||
+    result.label ||
+    result.result_label ||
+    "Normal";
+
+  if (status === "Exception") {
+    status = "Normal";
+  }
+
+  if (status === "Error") {
+    const msg = String(result.message || "");
+
+    if (
+      msg.includes("정상") ||
+      msg.includes("Normal") ||
+      msg.includes("Fall Alert가 아니므로")
+    ) {
+      status = "Normal";
+    }
+  }
+
+  const alert =
+    result.alert !== undefined
+      ? Boolean(result.alert)
+      : status === "Fall Alert";
+
+  return {
+    ...result,
+
+    status,
+    alert,
+
+    file_name:
+      result.file_name ||
+      result.filename ||
+      result.file ||
+      fallbackFileName ||
+      "-",
+    filename:
+      result.filename ||
+      result.file_name ||
+      result.file ||
+      fallbackFileName ||
+      "-",
+
+    raw_model_fall_prob: fallProb,
+    fall_prob: fallProb,
+    fall_probability: fallProb,
+
+    speed_max: speedMax,
+    max_speed: speedMax,
+
+    height_drop: heightDrop,
+    movement_after: movementAfter,
+
+    db_saved: Boolean(result.db_saved),
+
+    message:
+      result.message ||
+      (status === "Fall Alert"
+        ? "낙상 알림으로 판단되었습니다."
+        : "정상 행동으로 판단되었습니다. 낙상 알림 기준에 도달하지 않아 DB에는 저장하지 않습니다."),
+  };
+}
+
+function getEventId(event) {
+  return String(
+    event?._id || event?.id || event?.file_name || event?.filename || "",
+  );
+}
+
+function getDisplayStatus(status) {
+  if (status === "Exception") return "Normal";
+  return status || "-";
+}
+
+function getDisplayStatusText(status) {
+  if (status === "Exception") return "Normal";
+  return status || "-";
+}
+
+function getDisplayResultMessage(result) {
+  if (!result) return "";
+
+  if (result.status === "Error") {
+    return result.message || "예측 처리 중 오류가 발생했습니다.";
+  }
+
+  if (result.status === "Fall Alert") {
+    return result.message || "낙상 알림으로 판단되었습니다.";
+  }
+
+  return (
+    result.message ||
+    "정상 행동으로 판단되었습니다. 낙상 알림 기준에 도달하지 않아 DB에는 저장하지 않습니다."
+  );
 }
 
 function getModelFallProbability(result) {
@@ -180,10 +322,6 @@ function formatDateTime(value) {
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
-
-/* =========================================================
-   CSV 파싱 + 프레임별 낙상 점수 계산
-========================================================= */
 
 function parseCsvLine(line) {
   const result = [];
@@ -371,10 +509,6 @@ function parseFallScoreFromCsv(text) {
   };
 }
 
-/* =========================================================
-   프레임별 그래프 계산
-========================================================= */
-
 const HEIGHT_RISK_STANDARD = 0.3;
 const SPEED_RISK_STANDARD = 0.35;
 const STILLNESS_RISK_STANDARD = 0.2;
@@ -507,9 +641,26 @@ function detectDisplayFallZone(displayData, threshold = 70) {
   };
 }
 
-/* =========================================================
-   차트 컴포넌트
-========================================================= */
+function StatusBadge({ status }) {
+  const displayStatus = getDisplayStatus(status);
+
+  const cls =
+    displayStatus === "Fall Alert"
+      ? "badge danger"
+      : displayStatus === "Normal"
+        ? "badge normal"
+        : "badge";
+
+  return <span className={cls}>{displayStatus}</span>;
+}
+
+function AlertText({ alert }) {
+  return alert ? (
+    <span className="alert-true">알림 발생</span>
+  ) : (
+    <span className="alert-false">알림 없음</span>
+  );
+}
 
 function ProbabilityChart({ result }) {
   if (!result) return null;
@@ -1047,10 +1198,8 @@ function RecentEventChart({ events }) {
 
       <div className="mini-column-chart compact-history-bars">
         {events.map((event) => {
-          const prob = normalizeProbability(
-            event.raw_model_fall_prob ?? event.fall_prob,
-          );
-          const percent = Math.round(prob * 100);
+          const normalized = normalizeFallResult(event, event.file_name || "-");
+          const percent = getDisplayFallPercent(normalized);
           const height = Math.max(5, Math.min(100, percent));
 
           return (
@@ -1066,10 +1215,6 @@ function RecentEventChart({ events }) {
     </div>
   );
 }
-
-/* =========================================================
-   메인 컴포넌트
-========================================================= */
 
 function FallDashboard() {
   const [serverInfo, setServerInfo] = React.useState(null);
@@ -1093,7 +1238,7 @@ function FallDashboard() {
 
   const loadServerInfo = async () => {
     try {
-      const res = await apiGet("/");
+      const res = await apiGet("/health");
       setServerInfo(res.data);
     } catch (err) {
       setServerInfo(null);
@@ -1116,7 +1261,11 @@ function FallDashboard() {
     try {
       const res = await apiGet("/events?limit=50");
       const list = res.data.events || [];
-      setEvents(list);
+      const normalizedList = list.map((event) =>
+        normalizeFallResult(event, event.file_name || event.filename || "-"),
+      );
+
+      setEvents(normalizedList);
       setEventPage(1);
     } catch (err) {
       setEvents([]);
@@ -1182,11 +1331,14 @@ function FallDashboard() {
 
     try {
       const res = await apiPostForm("/predict", formData);
+      const normalizedResult = normalizeFallResult(res.data, selectedFile.name);
 
-      setPredictResult(res.data);
+      setPredictResult(normalizedResult);
       setSelectedEventId(null);
 
-      if (res.data.status === "Fall Alert") {
+      if (normalizedResult.status === "Error") {
+        setMessage(`예측 오류: ${normalizedResult.message}`);
+      } else if (normalizedResult.status === "Fall Alert") {
         setMessage("낙상 알림이 감지되어 저장했습니다.");
       } else {
         setMessage("정상 행동으로 판단되었습니다. DB에는 저장하지 않습니다.");
@@ -1195,6 +1347,7 @@ function FallDashboard() {
       await loadStats();
       await loadEvents();
     } catch (err) {
+      console.error("예측 요청 실패:", err);
       setMessage("예측 요청 중 오류가 발생했습니다.");
     } finally {
       setLoading(false);
@@ -1205,20 +1358,7 @@ function FallDashboard() {
     const eventId = getEventId(event);
 
     const historyResult = {
-      ...event,
-      file_name: event.file_name || "-",
-      status: event.status || "Fall Alert",
-      alert:
-        event.alert !== undefined ? event.alert : event.status === "Fall Alert",
-      fall_prob: event.fall_prob ?? event.raw_model_fall_prob ?? 0,
-      raw_model_fall_prob:
-        event.raw_model_fall_prob ??
-        event.raw_fall_prob ??
-        event.fall_prob ??
-        0,
-      speed_max: event.speed_max ?? 0,
-      height_drop: event.height_drop ?? 0,
-      movement_after: event.movement_after ?? 0,
+      ...normalizeFallResult(event, event.file_name || event.filename || "-"),
       db_saved: true,
       db_message: "저장된 과거 낙상 알림 이벤트입니다.",
     };
@@ -1252,51 +1392,49 @@ function FallDashboard() {
     <div className="page">
       <header className="dashboard-header">
         <div>
-          <h1>Smart Care AI</h1>
-          <p>mmWave 기반 독거노인 낙상 감지 관제 대시보드</p>
-        </div>
-        <button className="refresh-btn" onClick={refreshAll}>
-          새로고침
-        </button>
-      </header>
-
-      <section className="status-panel">
-        <div className="server-card">
-          <h2>서버 상태</h2>
-
-          <div className="server-grid">
-            <div>
-              <span>FastAPI</span>
-              <strong>{serverInfo ? "연결됨" : "연결 안 됨"}</strong>
-            </div>
-            <div>
-              <span>모델 파일</span>
-              <strong>{serverInfo?.model_exists ? "있음" : "없음"}</strong>
-            </div>
-            <div>
-              <span>MongoDB</span>
-              <strong>
-                {serverInfo?.mongo_connected ? "연결됨" : "연결 안 됨"}
-              </strong>
-            </div>
-          </div>
-
-          <p className="policy-text">
-            저장 정책: <strong>Fall Alert만 저장</strong>, 정상 행동은 저장하지
-            않음
+          <h1>독거노인 낙상 감지 관제 대시보드</h1>
+          <p>
+            mmWave CSV 센서 데이터를 업로드하고 낙상 위험도를 예측하여 정상
+            행동과 낙상 알림 상태를 분석합니다.
           </p>
         </div>
+      </header>
 
-        <div className="stats">
-          <div className="stat-card">
-            <span>저장된 전체 로그</span>
-            <strong>{stats?.total_events ?? 0}</strong>
-          </div>
+      <section className="fall-summary-grid">
+        <div className="fall-summary-card api-card">
+          <p>API 상태</p>
+          <strong>{serverInfo ? "정상 연결" : "확인 필요"}</strong>
+          <span>
+            {serverInfo?.model_exists
+              ? "낙상 감지 모델이 정상 로드되었습니다."
+              : "낙상 감지 모델 확인이 필요합니다."}
+          </span>
+        </div>
 
-          <div className="stat-card danger-card">
-            <span>낙상 알림</span>
-            <strong>{stats?.fall_alert_count ?? 0}</strong>
-          </div>
+        <div className="fall-summary-card mongo-card">
+          <p>MongoDB</p>
+          <strong>
+            {serverInfo?.mongo_connected ? "연결됨" : "연결 안 됨"}
+          </strong>
+          <span>낙상 알림 저장 DB 상태</span>
+        </div>
+
+        <div className="fall-summary-card">
+          <p>필요 Feature</p>
+          <strong>{FALL_REQUIRED_FEATURE_COUNT}</strong>
+          <span>CSV 필수 컬럼 개수</span>
+        </div>
+
+        <div className="fall-summary-card">
+          <p>낙상 기록</p>
+          <strong>{stats?.total_events ?? 0}</strong>
+          <span>Fall Alert만 저장된 누적 기록</span>
+        </div>
+
+        <div className="fall-summary-card danger-soft">
+          <p>보호자 알림</p>
+          <strong>{stats?.fall_alert_count ?? 0}</strong>
+          <span>즉시 확인 필요 건수</span>
         </div>
       </section>
 
@@ -1428,12 +1566,12 @@ function FallDashboard() {
                   </tr>
                 ) : (
                   pagedEvents.map((event) => {
-                    const eventPercent = Math.round(
-                      normalizeProbability(
-                        event.raw_model_fall_prob ?? event.fall_prob,
-                      ) * 100,
+                    const normalizedEvent = normalizeFallResult(
+                      event,
+                      event.file_name || event.filename || "-",
                     );
-                    const eventId = getEventId(event);
+                    const eventPercent = getDisplayFallPercent(normalizedEvent);
+                    const eventId = getEventId(normalizedEvent);
                     const isSelected = selectedEventId === eventId;
 
                     return (
@@ -1442,20 +1580,23 @@ function FallDashboard() {
                         className={`clickable-row ${
                           isSelected ? "selected-row" : ""
                         }`}
-                        onClick={() => handleSelectEvent(event)}
+                        onClick={() => handleSelectEvent(normalizedEvent)}
                         title="클릭하면 과거 결과값을 불러옵니다."
                       >
                         <td className="time-cell">
-                          {formatDateTime(event.created_at)}
+                          {formatDateTime(normalizedEvent.created_at)}
                         </td>
                         <td className="status-cell">
-                          <StatusBadge status={event.status} />
+                          <StatusBadge status={normalizedEvent.status} />
                         </td>
                         <td className="alert-cell">
-                          <AlertText alert={event.alert} />
+                          <AlertText alert={normalizedEvent.alert} />
                         </td>
-                        <td className="file-cell" title={event.file_name}>
-                          {event.file_name}
+                        <td
+                          className="file-cell"
+                          title={normalizedEvent.file_name}
+                        >
+                          {normalizedEvent.file_name}
                         </td>
                         <td className="prob-cell">{eventPercent}%</td>
                         <td className="id-cell">{String(eventId).slice(-6)}</td>

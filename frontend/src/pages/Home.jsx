@@ -20,30 +20,24 @@ function Home() {
           </h1>
 
           <p className="hero-desc">
-            mmWave 센서 데이터를 기반으로 낙상 사고뿐만 아니라 장시간 움직임
-            없음, 반복 배회와 같은 이상행동을 분석하여 보호자와 관제 담당자가
-            빠르게 대응할 수 있도록 지원하는 스마트 돌봄 관제 서비스입니다.
+            mmWave 센서와 생활·생체 센서 데이터를 기반으로 낙상 위험도와
+            이상행동 상태를 분석합니다. 관제 담당자는 대시보드에서 위험 상황,
+            보호자 알림 여부, 최근 기록을 확인하고 빠르게 대응할 수 있습니다.
           </p>
 
           <div className="hero-buttons">
-            <button onClick={() => navigate("/fall")}>
-              관제 대시보드 열기
-            </button>
-
-            <button className="outline" onClick={() => navigate("/fall")}>
-              CSV 예측 테스트
-            </button>
+            <button onClick={() => navigate("/fall")}>낙상 관제 열기</button>
 
             <button className="outline" onClick={() => navigate("/abnormal")}>
-              이상행동 분석 보기
+              이상행동 관제 열기
             </button>
           </div>
 
           <div className="hero-tags">
-            <span>낙상 감지</span>
+            <span>mmWave 낙상 감지</span>
             <span>이상행동 분석</span>
             <span>비영상 센서 기반</span>
-            <span>실시간 알림</span>
+            <span>보호자 알림</span>
           </div>
         </div>
 
@@ -61,22 +55,25 @@ function Home() {
               <FlowItem
                 number="01"
                 title="센서 데이터 수집"
-                desc="mmWave 센서로 움직임 데이터를 수집합니다."
+                desc="mmWave CSV와 생활·생체 센서 데이터를 업로드합니다."
               />
+
               <FlowItem
                 number="02"
-                title="행동 패턴 분석"
-                desc="낙상, 무활동, 반복 배회 등 위험 행동을 분석합니다."
+                title="AI 행동 분석"
+                desc="낙상 위험도와 위험, 주의, 외출, 식사, 수면 상태를 예측합니다."
               />
+
               <FlowItem
                 number="03"
                 title="위험 상황 판단"
-                desc="AI 모델이 이상 여부와 알림 필요성을 판단합니다."
+                desc="Fall Alert 또는 위험/주의 상태인지 판단하고 기록 여부를 결정합니다."
               />
+
               <FlowItem
                 number="04"
-                title="관제 및 보호자 연계"
-                desc="관제 화면에서 결과를 확인하고 대응할 수 있습니다."
+                title="관제 및 보호자 알림"
+                desc="위험 상황은 관제 화면에 표시하고 보호자 확인 대상으로 관리합니다."
               />
             </div>
           </div>
@@ -88,8 +85,8 @@ function Home() {
           <p>MAIN FEATURES</p>
           <h2>주요 기능</h2>
           <span>
-            실제 돌봄 상황에서 필요한 낙상 감지, 이상행동 분석, 알림, 관제
-            기능을 하나의 서비스 흐름으로 구성했습니다.
+            실제 구현한 낙상 예측, 이상행동 예측, 센서 정보 표시, 보호자 알림
+            흐름을 중심으로 구성했습니다.
           </span>
         </div>
 
@@ -97,29 +94,32 @@ function Home() {
           <FeatureCard
             icon="01"
             title="낙상 감지"
-            desc="mmWave 센서 CSV 데이터를 분석하여 넘어짐으로 의심되는 상황을 감지합니다."
+            desc="mmWave CSV 데이터를 분석하여 낙상 위험도와 Fall Alert 여부를 판단합니다."
           />
+
           <FeatureCard
             icon="02"
             title="이상행동 분석"
-            desc="장시간 움직임 없음, 반복 배회, 비정상적인 움직임 패턴을 분석할 수 있도록 확장합니다."
+            desc="실내 환경, 생체 신호, 활동 정보를 바탕으로 위험, 주의, 외출, 식사, 수면 상태를 예측합니다."
           />
+
           <FeatureCard
             icon="03"
-            title="비영상 기반 안전 관리"
+            title="비영상 기반 관리"
             desc="카메라 영상 대신 센서 데이터를 활용하여 개인정보 부담을 줄입니다."
           />
+
           <FeatureCard
             icon="04"
-            title="협업 관제"
-            desc="예측 결과와 이벤트 로그를 관제 화면에서 확인하고 보호자 대응 흐름과 연결합니다."
+            title="보호자 알림"
+            desc="위험 상황이나 반복 주의 상황을 보호자 확인 필요 상태로 표시합니다."
           />
         </div>
       </section>
 
       <section className="scenario-section">
         <div className="scenario-card">
-          <div>
+          <div className="scenario-title">
             <p>DETECTION SCENARIO</p>
             <h2>분석 대상 행동</h2>
           </div>
@@ -127,19 +127,22 @@ function Home() {
           <div className="scenario-grid">
             <ScenarioItem
               title="낙상 사고"
-              desc="갑작스러운 자세 변화와 속도 변화를 분석"
+              desc="높이 변화, 속도 변화, 이후 움직임을 분석합니다."
             />
+
             <ScenarioItem
-              title="장시간 무활동"
-              desc="일정 시간 이상 움직임이 없는 상태 확인"
+              title="위험 상태"
+              desc="생체 신호나 활동 패턴이 위험 기준에 가까운 상태를 판단합니다."
             />
+
             <ScenarioItem
-              title="반복 배회"
-              desc="같은 구간을 반복적으로 이동하는 패턴 분석"
+              title="주의 상태"
+              desc="반복적으로 이상 징후가 감지되는 상태를 관찰합니다."
             />
+
             <ScenarioItem
-              title="위험 알림"
-              desc="이상 상황 발생 시 관제 화면에서 빠르게 확인"
+              title="생활 상태"
+              desc="외출, 식사, 수면, 정상 상태를 최신 예측 결과로 표시합니다."
             />
           </div>
         </div>

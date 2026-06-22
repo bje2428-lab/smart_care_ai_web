@@ -10,23 +10,10 @@ from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel
 
 
-# =========================================================
-# 프로젝트 경로 설정
-# backend/AbnormalDashboard.py 기준
-# ROOT_DIR    = C:\smart_care_ai_web
-# BACKEND_DIR = C:\smart_care_ai_web\backend
-# MODEL_DIR   = C:\smart_care_ai_web\models
-# =========================================================
-
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BACKEND_DIR = Path(__file__).resolve().parent
 MODEL_DIR = ROOT_DIR / "models"
 
-
-# =========================================================
-# 이상행동 모델 파일 경로
-# pkl 파일은 전부 C:\smart_care_ai_web\models 안에 둠
-# =========================================================
 
 ELDERCARE_MODEL_PATH = MODEL_DIR / "eldercare_xgb_model.pkl"
 ELDERCARE_LABEL_ENCODER_PATH = MODEL_DIR / "eldercare_label_encoder.pkl"
@@ -35,35 +22,36 @@ ELDERCARE_REASON_ENCODER_PATH = MODEL_DIR / "eldercare_reason_encoder.pkl"
 ELDERCARE_FEATURES_PATH = MODEL_DIR / "eldercare_features.pkl"
 
 
-# =========================================================
-# 이상행동 기록 저장 파일
-# MongoDB 없이 바로 동작하게 JSON 파일로 저장
-# =========================================================
-
 ABNORMAL_HISTORY_PATH = BACKEND_DIR / "abnormal_events_store.json"
 
 
-# =========================================================
-# APIRouter
-# FallDashboard.py에서 include_router로 연결함
-#
-# 최종 주소:
-# GET  /abnormal/health
-# GET  /abnormal/features
-# POST /abnormal/predict
-# POST /abnormal/simulation/upload
-# POST /abnormal/simulation/next
-# GET  /abnormal/history
-# GET  /abnormal/alerts
-# GET  /abnormal/dashboard
-# =========================================================
+DEFAULT_FEATURES = [
+    "Temperature",
+    "Humidity",
+    "Illuminance",
+    "Activity_IR",
+    "CO2",
+    "TVOC",
+    "HeartRate",
+    "BreathRate",
+    "SPO2",
+    "SkinTemperature",
+    "SleepPhase",
+    "SleepScore",
+    "WalkingSteps",
+    "StressIndex",
+    "ActivityIntensity",
+    "CaloricExpenditure",
+    "Button",
+    "Shout",
+]
+
+
+SAVE_HISTORY_STATES = {"위험", "주의"}
+
 
 router = APIRouter(prefix="/abnormal", tags=["Abnormal Behavior"])
 
-
-# =========================================================
-# 전역 모델 객체
-# =========================================================
 
 model = None
 label_encoder = None
@@ -72,26 +60,15 @@ reason_encoder = None
 features = None
 
 
-# =========================================================
-# 시뮬레이션 상태
-# =========================================================
-
 simulation_df = None
 simulation_index = 0
 simulation_filename = None
 
 
-# =========================================================
-# 요청 스키마
-# 프론트에서는 아래 형태로 보냄:
-# {
-#   "sensor": {
-#     "feature1": 0,
-#     "feature2": 0
-#   },
-#   "source": "web"
-# }
-# =========================================================
+# 저장은 위험/주의만 하지만,
+# 주의 3회 연속 판단은 정상/수면/식사/외출까지 포함한 실제 예측 흐름을 봐야 함
+recent_prediction_states = []
+
 
 class AbnormalPredictRequest(BaseModel):
     sensor: Dict[str, Any]
@@ -100,9 +77,42 @@ class AbnormalPredictRequest(BaseModel):
     actual_reason: Optional[str] = None
 
 
-# =========================================================
-# 모델 로딩
-# =========================================================
+def get_model_file_status():
+    required_files = [
+        ELDERCARE_MODEL_PATH,
+        ELDERCARE_LABEL_ENCODER_PATH,
+        ELDERCARE_REASON_MODEL_PATH,
+        ELDERCARE_REASON_ENCODER_PATH,
+        ELDERCARE_FEATURES_PATH,
+    ]
+
+    existing_files = [str(path) for path in required_files if path.exists()]
+    missing_files = [str(path) for path in required_files if not path.exists()]
+
+    return {
+        "all_exists": len(missing_files) == 0,
+        "existing_files": existing_files,
+        "missing_files": missing_files,
+    }
+
+
+def load_feature_list():
+    global features
+
+    if features is not None:
+        return features
+
+    if ELDERCARE_FEATURES_PATH.exists():
+        try:
+            loaded = joblib.load(ELDERCARE_FEATURES_PATH)
+            features = list(loaded)
+            return features
+        except Exception:
+            pass
+
+    features = list(DEFAULT_FEATURES)
+    return features
+
 
 def load_eldercare_models():
     global model
@@ -114,39 +124,25 @@ def load_eldercare_models():
     if model is not None:
         return
 
-    required_files = [
-        ELDERCARE_MODEL_PATH,
-        ELDERCARE_LABEL_ENCODER_PATH,
-        ELDERCARE_REASON_MODEL_PATH,
-        ELDERCARE_REASON_ENCODER_PATH,
-        ELDERCARE_FEATURES_PATH,
-    ]
+    file_status = get_model_file_status()
 
-    missing_files = [str(path) for path in required_files if not path.exists()]
-
-    if missing_files:
+    if not file_status["all_exists"]:
         raise FileNotFoundError(
             "이상행동 모델 파일이 없습니다.\n"
             "아래 파일들을 C:\\smart_care_ai_web\\models 폴더에 넣어주세요.\n\n"
-            + "\n".join(missing_files)
+            + "\n".join(file_status["missing_files"])
         )
 
     model = joblib.load(ELDERCARE_MODEL_PATH)
     label_encoder = joblib.load(ELDERCARE_LABEL_ENCODER_PATH)
     reason_model = joblib.load(ELDERCARE_REASON_MODEL_PATH)
     reason_encoder = joblib.load(ELDERCARE_REASON_ENCODER_PATH)
-    features = joblib.load(ELDERCARE_FEATURES_PATH)
-
-    features = list(features)
+    features = list(joblib.load(ELDERCARE_FEATURES_PATH))
 
     print("[ABNORMAL MODEL] 이상행동 모델 로드 완료")
     print(f"[ABNORMAL MODEL] feature 개수: {len(features)}")
     print(f"[ABNORMAL MODEL] 모델 경로: {ELDERCARE_MODEL_PATH}")
 
-
-# =========================================================
-# 위험 점수 / 보호자 알림
-# =========================================================
 
 def risk_score_by_state(state):
     if state == "위험":
@@ -162,34 +158,46 @@ def risk_score_by_state(state):
     return 18
 
 
+def is_save_history_state(state: str) -> bool:
+    return state in SAVE_HISTORY_STATES
+
+
 def load_abnormal_history():
     if not ABNORMAL_HISTORY_PATH.exists():
         return []
 
     try:
         with open(ABNORMAL_HISTORY_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+
+        if not isinstance(data, list):
+            return []
+
+        # 예전 파일에 외출/식사/수면/정상 기록이 섞여 있어도 화면에는 위험/주의만 보여줌
+        return [
+            item for item in data
+            if item.get("state") in SAVE_HISTORY_STATES
+        ]
+
     except Exception:
         return []
 
 
 def save_abnormal_history(history):
+    filtered_history = [
+        item for item in history
+        if item.get("state") in SAVE_HISTORY_STATES
+    ]
+
     with open(ABNORMAL_HISTORY_PATH, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
+        json.dump(filtered_history, f, ensure_ascii=False, indent=2)
 
 
-def get_recent_warning_count(limit=2):
-    """
-    최근 기록 중 연속된 '주의' 개수 확인.
-    현재 예측이 '주의'일 때, 최근 2개도 '주의'면 총 3회 연속으로 판단.
-    """
-    history = load_abnormal_history()
-    recent = list(reversed(history))[:limit]
-
+def get_recent_warning_count_from_memory(limit=2):
     count = 0
 
-    for item in recent:
-        if item.get("state") == "주의":
+    for state in reversed(recent_prediction_states[-limit:]):
+        if state == "주의":
             count += 1
         else:
             break
@@ -206,7 +214,7 @@ def guardian_alert_by_state(state):
         }
 
     if state == "주의":
-        recent_warning_count = get_recent_warning_count(limit=2)
+        recent_warning_count = get_recent_warning_count_from_memory(limit=2)
 
         if recent_warning_count >= 2:
             return {
@@ -228,35 +236,23 @@ def guardian_alert_by_state(state):
     }
 
 
-# =========================================================
-# 입력값 전처리
-# =========================================================
-
 def build_input_dataframe(input_dict: dict):
     load_eldercare_models()
 
     input_df = pd.DataFrame([input_dict])
 
-    # 모델이 원하는 feature가 없으면 0으로 채움
     for col in features:
         if col not in input_df.columns:
             input_df[col] = 0
 
-    # 숫자 변환
     for col in features:
         input_df[col] = pd.to_numeric(input_df[col], errors="coerce")
 
     input_df = input_df.fillna(0)
-
-    # 학습 당시 feature 순서로 정렬
     input_df = input_df[features]
 
     return input_df
 
-
-# =========================================================
-# 예측 실행
-# =========================================================
 
 def run_prediction(
     input_dict,
@@ -264,23 +260,22 @@ def run_prediction(
     actual_state=None,
     actual_reason=None,
 ):
+    global recent_prediction_states
+
     load_eldercare_models()
 
     input_df = build_input_dataframe(input_dict)
 
-    # 상태 예측
     pred_encoded = model.predict(input_df)
     state = str(label_encoder.inverse_transform(pred_encoded)[0])
 
-    # 사유 예측
     reason_encoded = reason_model.predict(input_df)
     reason = str(reason_encoder.inverse_transform(reason_encoded)[0])
 
-    # 위험 점수
     risk_score = risk_score_by_state(state)
-
-    # 보호자 알림 여부
     guardian = guardian_alert_by_state(state)
+
+    should_save = is_save_history_state(state)
 
     result = {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -293,55 +288,69 @@ def run_prediction(
         "actual_reason": actual_reason,
         **guardian,
         "sensor": input_dict,
+        "saved_to_history": should_save,
+        "save_policy": "위험/주의만 저장, 그 외 상태는 최신 결과로만 표시",
     }
 
-    history = load_abnormal_history()
-    history.append(result)
+    # 실제 예측 흐름은 항상 기억
+    # 그래야 주의 3회 연속 판단이 정상/수면/식사/외출로 끊길 수 있음
+    recent_prediction_states.append(state)
+    recent_prediction_states = recent_prediction_states[-50:]
 
-    # 최근 300개만 저장
-    history = history[-300:]
+    # 위험 / 주의만 기록 저장
+    if should_save:
+        history = load_abnormal_history()
+        history.append(result)
 
-    save_abnormal_history(history)
+        # 최근 위험/주의 기록 300개만 저장
+        history = history[-300:]
+
+        save_abnormal_history(history)
 
     return result
 
 
-# =========================================================
-# 기본 상태 API
-# =========================================================
-
-@router.get(
-    "/",
-    summary="이상행동 API 기본 상태 확인",
-    description="이상행동 관제 API가 실행 중인지 확인합니다.",
-)
+@router.get("/")
 def root():
     return {
         "message": "이상행동 관제 API 실행중",
         "service": "독거노인 돌봄 상태 예측 API",
         "model_dir": str(MODEL_DIR),
         "history_path": str(ABNORMAL_HISTORY_PATH),
+        "save_policy": "위험/주의만 저장",
     }
 
 
-@router.get(
-    "/health",
-    summary="이상행동 서버 및 모델 상태 확인",
-    description="AI 모델 파일 로드 상태와 feature 정보를 확인합니다.",
-)
+@router.get("/health")
 def health():
+    file_status = get_model_file_status()
+
     try:
-        load_eldercare_models()
+        if file_status["all_exists"]:
+            load_eldercare_models()
+            model_state = "loaded"
+            status = "ok"
+            message = "이상행동 모델이 정상 로드되었습니다."
+        else:
+            model_state = "not-loaded"
+            status = "warning"
+            message = "이상행동 모델 파일이 없어 예측은 불가능하지만 API는 실행 중입니다."
+
+        feature_list = load_feature_list()
 
         return {
-            "status": "ok",
+            "status": status,
             "api": "abnormal-running",
-            "model": "loaded",
-            "feature_count": len(features),
+            "model": model_state,
+            "message": message,
+            "feature_count": len(feature_list),
             "simulation_file": simulation_filename,
             "simulation_index": simulation_index,
+            "model_dir": str(MODEL_DIR),
             "model_path": str(ELDERCARE_MODEL_PATH),
             "features_path": str(ELDERCARE_FEATURES_PATH),
+            "missing_files": file_status["missing_files"],
+            "save_policy": "위험/주의만 저장",
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -351,46 +360,27 @@ def health():
             "api": "abnormal-running",
             "model": "not-loaded",
             "message": str(e),
+            "missing_files": file_status["missing_files"],
+            "save_policy": "위험/주의만 저장",
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
 
-@router.get(
-    "/features",
-    summary="이상행동 모델 입력 feature 조회",
-    description="이상행동 모델이 필요로 하는 입력 컬럼 목록을 반환합니다.",
-)
+@router.get("/features")
 def get_features():
-    load_eldercare_models()
+    feature_list = load_feature_list()
+    file_status = get_model_file_status()
 
     return {
-        "feature_count": len(features),
-        "features": features,
+        "feature_count": len(feature_list),
+        "features": feature_list,
+        "model_loaded": model is not None,
+        "model_files_ready": file_status["all_exists"],
+        "missing_files": file_status["missing_files"],
     }
 
 
-# =========================================================
-# 예측 API
-# =========================================================
-
-@router.post(
-    "/predict",
-    summary="돌봄 상태 예측",
-    description="""
-센서 데이터를 입력받아 독거노인의 현재 돌봄 상태를 예측합니다.
-
-예측 상태:
-- 수면
-- 식사
-- 외출
-- 주의
-- 위험
-- 기타
-
-예측 후 기록 파일에 저장되며,
-위험 또는 주의 상태일 경우 보호자 알림 여부도 함께 반환합니다.
-""",
-)
+@router.post("/predict")
 def predict(request: AbnormalPredictRequest):
     try:
         return run_prediction(
@@ -404,29 +394,12 @@ def predict(request: AbnormalPredictRequest):
         raise HTTPException(status_code=500, detail=f"이상행동 예측 실패: {e}")
 
 
-# =========================================================
-# 시뮬레이션 파일 업로드
-# =========================================================
-
-@router.post(
-    "/simulation/upload",
-    summary="시뮬레이션 파일 업로드",
-    description="""
-CSV 또는 Excel 파일을 업로드합니다.
-
-업로드된 파일은 실제 센서 스트림처럼 한 줄씩 재생됩니다.
-파일에는 모델 입력에 필요한 센서 컬럼들이 포함되어야 합니다.
-
-지원 형식:
-- .csv
-- .xlsx
-- .xls
-""",
-)
+@router.post("/simulation/upload")
 async def upload_simulation_file(file: UploadFile = File(...)):
     global simulation_df
     global simulation_index
     global simulation_filename
+    global recent_prediction_states
 
     load_eldercare_models()
 
@@ -464,6 +437,7 @@ async def upload_simulation_file(file: UploadFile = File(...)):
     simulation_df = df.copy()
     simulation_index = 0
     simulation_filename = filename
+    recent_prediction_states = []
 
     return {
         "message": "시뮬레이션 파일 업로드 완료",
@@ -471,19 +445,17 @@ async def upload_simulation_file(file: UploadFile = File(...)):
         "rows": len(simulation_df),
         "columns": list(simulation_df.columns),
         "start_index": simulation_index,
+        "save_policy": "위험/주의만 저장",
     }
 
 
-@router.get(
-    "/simulation/status",
-    summary="시뮬레이션 상태 조회",
-    description="현재 업로드된 시뮬레이션 파일의 상태를 조회합니다.",
-)
+@router.get("/simulation/status")
 def simulation_status():
     if simulation_df is None:
         return {
             "loaded": False,
             "message": "업로드된 시뮬레이션 파일이 없습니다.",
+            "save_policy": "위험/주의만 저장",
         }
 
     return {
@@ -492,16 +464,15 @@ def simulation_status():
         "rows": len(simulation_df),
         "current_index": simulation_index,
         "remaining": max(len(simulation_df) - simulation_index, 0),
+        "auto_interval_seconds": 10,
+        "save_policy": "위험/주의만 저장",
     }
 
 
-@router.post(
-    "/simulation/reset",
-    summary="시뮬레이션 처음부터 다시 시작",
-    description="업로드된 시뮬레이션 파일의 재생 위치를 0번 행으로 초기화합니다.",
-)
+@router.post("/simulation/reset")
 def simulation_reset():
     global simulation_index
+    global recent_prediction_states
 
     if simulation_df is None:
         raise HTTPException(
@@ -510,29 +481,16 @@ def simulation_reset():
         )
 
     simulation_index = 0
+    recent_prediction_states = []
 
     return {
         "message": "시뮬레이션 인덱스 초기화 완료",
         "current_index": simulation_index,
+        "save_policy": "위험/주의만 저장",
     }
 
 
-@router.post(
-    "/simulation/next",
-    summary="다음 센서 데이터 실행",
-    description="""
-업로드된 CSV/Excel 파일에서 다음 행을 읽어 AI 예측을 수행합니다.
-
-동작 과정:
-1. 현재 행의 센서값을 읽음
-2. AI 모델에 입력
-3. 돌봄 상태 예측
-4. 위험지수 계산
-5. 보호자 알림 여부 판단
-6. 기록 저장
-7. 다음 행으로 이동
-""",
-)
+@router.post("/simulation/next")
 def simulation_next():
     global simulation_index
 
@@ -586,20 +544,13 @@ def simulation_next():
         "row_index": current_index,
         "next_index": simulation_index,
         "total_rows": len(simulation_df),
+        "remaining": max(len(simulation_df) - simulation_index, 0),
     }
 
     return result
 
 
-# =========================================================
-# 기록 조회 API
-# =========================================================
-
-@router.get(
-    "/history",
-    summary="돌봄 상태 예측 이력 조회",
-    description="최근 이상행동 예측 이력을 조회합니다.",
-)
+@router.get("/history")
 def get_history(limit: int = 20):
     history = load_abnormal_history()
     history = list(reversed(history))
@@ -609,34 +560,25 @@ def get_history(limit: int = 20):
     return {
         "count": min(limit, len(history)),
         "items": history[:limit],
+        "save_policy": "위험/주의만 저장",
     }
 
 
-@router.delete(
-    "/history",
-    summary="이상행동 이력 삭제",
-    description="저장된 이상행동 예측 이력을 모두 삭제합니다.",
-)
+@router.delete("/history")
 def delete_history():
+    global recent_prediction_states
+
     save_abnormal_history([])
+    recent_prediction_states = []
 
     return {
         "deleted": True,
-        "message": "이상행동 기록을 삭제했습니다.",
+        "message": "위험/주의 이상행동 기록을 삭제했습니다.",
+        "save_policy": "위험/주의만 저장",
     }
 
 
-@router.get(
-    "/alerts",
-    summary="위험 및 보호자 알림 조회",
-    description="""
-실제로 보호자 알림이 발생한 이력만 조회합니다.
-
-표시 대상:
-- 위험 상태
-- 주의 상태 3회 연속 발생
-""",
-)
+@router.get("/alerts")
 def get_alerts(limit: int = 20):
     history = load_abnormal_history()
 
@@ -652,14 +594,11 @@ def get_alerts(limit: int = 20):
     return {
         "count": min(limit, len(alerts)),
         "items": alerts[:limit],
+        "save_policy": "위험/주의만 저장",
     }
 
 
-@router.get(
-    "/dashboard",
-    summary="대시보드 통합 데이터 조회",
-    description="최신 예측 결과와 최근 이력을 한 번에 조회합니다.",
-)
+@router.get("/dashboard")
 def dashboard():
     history = load_abnormal_history()
 
@@ -669,23 +608,17 @@ def dashboard():
     return {
         "latest": latest,
         "recent": recent,
+        "save_policy": "위험/주의만 저장",
     }
 
 
-@router.get(
-    "/stats",
-    summary="이상행동 통계 조회",
-    description="이상행동 대시보드 카드에 표시할 통계를 조회합니다.",
-)
+@router.get("/stats")
 def stats():
     history = load_abnormal_history()
 
     total = len(history)
     danger_count = len([x for x in history if x.get("state") == "위험"])
     warning_count = len([x for x in history if x.get("state") == "주의"])
-    outing_count = len([x for x in history if x.get("state") == "외출"])
-    meal_count = len([x for x in history if x.get("state") == "식사"])
-    sleep_count = len([x for x in history if x.get("state") == "수면"])
     guardian_alert_count = len([x for x in history if x.get("guardian_alert") is True])
 
     latest = history[-1] if history else None
@@ -694,9 +627,13 @@ def stats():
         "total": total,
         "danger_count": danger_count,
         "warning_count": warning_count,
-        "outing_count": outing_count,
-        "meal_count": meal_count,
-        "sleep_count": sleep_count,
+
+        # 저장 정책상 아래 상태들은 기록에 저장하지 않으므로 0
+        "outing_count": 0,
+        "meal_count": 0,
+        "sleep_count": 0,
+
         "guardian_alert_count": guardian_alert_count,
         "latest": latest,
+        "save_policy": "위험/주의만 저장",
     }
