@@ -1,26 +1,28 @@
 # Python
 __pycache__/
 *.pyc
-.venv/
 venv/
-env/
+.venv/
+backend/venv/
+backend/__pycache__/
 
-# Node / React
+# React / Node
 node_modules/
 dist/
 build/
+frontend/node_modules/
 
 # Env
 .env
 .env.local
+backend/.env
+frontend/.env
 
-# Data / Large files
-data/
-*.csv
-*.npy
-*.joblib
+# Data / Logs
+*.log
 
 # OS / Editor
 .vscode/
 .DS_Store
 Thumbs.db
+backend/abnormal_events_store.json
