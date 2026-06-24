@@ -1,6 +1,5 @@
 import React from "react";
 import axios from "axios";
-
 import "./FallDashboard.css";
 
 const API_URLS = (
@@ -9,62 +8,84 @@ const API_URLS = (
   ""
 )
   .split(",")
-  .map((url) => url.trim())
+  .map((url) => url.trim().replace(/\/+$/, ""))
   .filter(Boolean);
 
+const FPS = 20;
+const FRAME_WINDOW_SIZE = 10;
+const REALTIME_INTERVAL_MS = 650;
 const EVENT_PAGE_SIZE = 5;
-const FALL_REQUIRED_FEATURE_COUNT = 8;
+const LIVE_PAGE_SIZE = 5;
 
 let activeApiBaseUrl = null;
 
-async function getActiveApiBaseUrl() {
-  if (activeApiBaseUrl) return activeApiBaseUrl;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
+function getErrorMessage(error) {
+  if (error?.code === "ECONNABORTED") return "요청 시간 초과";
+  if (error?.response?.status) return `HTTP ${error.response.status}`;
+  if (error?.message) return error.message;
+  return "알 수 없는 오류";
+}
+
+async function requestApi(path, options = {}) {
   if (API_URLS.length === 0) {
-    throw new Error(
-      ".env에 VITE_API_URLS 또는 VITE_API_URL이 설정되어 있지 않습니다.",
-    );
+    throw new Error(".env에 VITE_API_URLS 또는 VITE_API_URL이 없습니다.");
   }
 
-  for (const url of API_URLS) {
-    try {
-      const res = await axios.get(`${url}/health`, { timeout: 2000 });
+  const urls = activeApiBaseUrl
+    ? [activeApiBaseUrl, ...API_URLS.filter((url) => url !== activeApiBaseUrl)]
+    : API_URLS;
 
-      if (res.status === 200) {
-        activeApiBaseUrl = url;
-        console.log("연결된 백엔드:", activeApiBaseUrl);
-        return activeApiBaseUrl;
-      }
-    } catch (err) {
-      console.log(`${url} 연결 실패`, err);
+  const errors = [];
+
+  for (const baseUrl of urls) {
+    try {
+      const res = await axios({
+        method: options.method || "get",
+        url: `${baseUrl}${path}`,
+        data: options.data,
+        headers: options.headers,
+        timeout: options.timeout || 10000,
+      });
+
+      activeApiBaseUrl = baseUrl;
+      return res;
+    } catch (error) {
+      errors.push(`${baseUrl}: ${getErrorMessage(error)}`);
+      console.log(`${baseUrl} 연결 실패`, error);
     }
   }
 
-  throw new Error("사용 가능한 백엔드 서버가 없습니다.");
-}
-
-function resetActiveApiBaseUrl() {
-  activeApiBaseUrl = null;
+  throw new Error(`백엔드 연결 실패: ${errors.join(" / ")}`);
 }
 
 async function apiGet(path) {
-  const baseUrl = await getActiveApiBaseUrl();
-  return axios.get(`${baseUrl}${path}`);
+  return requestApi(path, {
+    method: "get",
+    timeout: 10000,
+  });
 }
 
-async function apiPostForm(path, formData) {
-  const baseUrl = await getActiveApiBaseUrl();
+async function apiPostForm(path, formData, saveEvent = true) {
+  const query = path.includes("?")
+    ? `&save_event=${saveEvent}`
+    : `?save_event=${saveEvent}`;
 
-  return axios.post(`${baseUrl}${path}`, formData, {
-    headers: {
-      "Content-Type": "multipart/form-data",
-    },
+  return requestApi(`${path}${query}`, {
+    method: "post",
+    data: formData,
+    timeout: 60000,
   });
 }
 
 async function apiDelete(path) {
-  const baseUrl = await getActiveApiBaseUrl();
-  return axios.delete(`${baseUrl}${path}`);
+  return requestApi(path, {
+    method: "delete",
+    timeout: 10000,
+  });
 }
 
 function toSafeNumber(value) {
@@ -73,9 +94,7 @@ function toSafeNumber(value) {
   if (typeof value === "string") {
     const cleaned = value.replace("%", "").trim();
     const num = Number(cleaned);
-
     if (!Number.isFinite(num)) return 0;
-
     return value.includes("%") ? num / 100 : num;
   }
 
@@ -88,14 +107,8 @@ function normalizeProbability(value) {
   return num > 1 ? num / 100 : num;
 }
 
-function getFirstNumber(...values) {
-  for (const value of values) {
-    if (value !== undefined && value !== null && value !== "") {
-      return toSafeNumber(value);
-    }
-  }
-
-  return 0;
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function getFromResult(result, keys) {
@@ -121,6 +134,16 @@ function getFromResult(result, keys) {
   }
 
   return undefined;
+}
+
+function getFirstNumber(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== "") {
+      return toSafeNumber(value);
+    }
+  }
+
+  return 0;
 }
 
 function normalizeFallResult(data, fallbackFileName = "-") {
@@ -181,20 +204,10 @@ function normalizeFallResult(data, fallbackFileName = "-") {
     result.result_label ||
     "Normal";
 
-  if (status === "Exception") {
-    status = "Normal";
-  }
+  if (status === "Exception") status = "Normal";
 
-  if (status === "Error") {
-    const msg = String(result.message || "");
-
-    if (
-      msg.includes("정상") ||
-      msg.includes("Normal") ||
-      msg.includes("Fall Alert가 아니므로")
-    ) {
-      status = "Normal";
-    }
+  if (fallProb >= 0.7) {
+    status = "Fall Alert";
   }
 
   const alert =
@@ -202,9 +215,21 @@ function normalizeFallResult(data, fallbackFileName = "-") {
       ? Boolean(result.alert)
       : status === "Fall Alert";
 
+  const windowResults = Array.isArray(result.window_results)
+    ? result.window_results.map((item, index) =>
+        normalizeFallResult(
+          {
+            ...item,
+            chunk_index: item.chunk_index ?? index,
+            file_name: result.file_name || fallbackFileName,
+          },
+          result.file_name || fallbackFileName,
+        ),
+      )
+    : [];
+
   return {
     ...result,
-
     status,
     alert,
 
@@ -227,9 +252,34 @@ function normalizeFallResult(data, fallbackFileName = "-") {
 
     speed_max: speedMax,
     max_speed: speedMax,
-
     height_drop: heightDrop,
     movement_after: movementAfter,
+
+    frame_start:
+      result.frame_start !== undefined && result.frame_start !== null
+        ? toSafeNumber(result.frame_start)
+        : null,
+    frame_end:
+      result.frame_end !== undefined && result.frame_end !== null
+        ? toSafeNumber(result.frame_end)
+        : null,
+
+    frame_count: toSafeNumber(result.frame_count),
+    point_count: toSafeNumber(result.point_count),
+
+    window_results: windowResults,
+
+    action_case: result.action_case || "unknown",
+    action_label: result.action_label || "행동 케이스 분석 없음",
+    behavior_pattern:
+      result.behavior_pattern || "행동 패턴 분석 정보가 없습니다.",
+    likely_cause: result.likely_cause || "추정 원인 정보가 없습니다.",
+    analysis_summary: result.analysis_summary || "분석 요약 정보가 없습니다.",
+    direction: result.direction || "-",
+    risk_reason: Array.isArray(result.risk_reason) ? result.risk_reason : [],
+    recommendations: Array.isArray(result.recommendations)
+      ? result.recommendations
+      : [],
 
     db_saved: Boolean(result.db_saved),
 
@@ -239,39 +289,6 @@ function normalizeFallResult(data, fallbackFileName = "-") {
         ? "낙상 알림으로 판단되었습니다."
         : "정상 행동으로 판단되었습니다. 낙상 알림 기준에 도달하지 않아 DB에는 저장하지 않습니다."),
   };
-}
-
-function getEventId(event) {
-  return String(
-    event?._id || event?.id || event?.file_name || event?.filename || "",
-  );
-}
-
-function getDisplayStatus(status) {
-  if (status === "Exception") return "Normal";
-  return status || "-";
-}
-
-function getDisplayStatusText(status) {
-  if (status === "Exception") return "Normal";
-  return status || "-";
-}
-
-function getDisplayResultMessage(result) {
-  if (!result) return "";
-
-  if (result.status === "Error") {
-    return result.message || "예측 처리 중 오류가 발생했습니다.";
-  }
-
-  if (result.status === "Fall Alert") {
-    return result.message || "낙상 알림으로 판단되었습니다.";
-  }
-
-  return (
-    result.message ||
-    "정상 행동으로 판단되었습니다. 낙상 알림 기준에 도달하지 않아 DB에는 저장하지 않습니다."
-  );
 }
 
 function getModelFallProbability(result) {
@@ -286,32 +303,20 @@ function getModelFallProbability(result) {
   return normalizeProbability(value);
 }
 
-function getDisplayFallProbability(result) {
-  if (!result) return 0;
-  return getModelFallProbability(result);
-}
-
 function getDisplayFallPercent(result) {
-  return Math.round(getDisplayFallProbability(result) * 100);
+  return Math.round(getModelFallProbability(result) * 100);
 }
 
 function getRiskLevelText(percent) {
   if (percent >= 85) return "매우 높음";
-  if (percent >= 60) return "높음";
-  if (percent >= 30) return "주의";
+  if (percent >= 70) return "위험";
+  if (percent >= 40) return "주의";
   return "낮음";
 }
 
-function formatMeter(value) {
-  return `${toSafeNumber(value).toFixed(4)} m`;
-}
-
-function formatSpeed(value) {
-  return `${toSafeNumber(value).toFixed(4)} m/s`;
-}
-
-function formatMovementCm(value) {
-  return `${(toSafeNumber(value) * 100).toFixed(2)} cm`;
+function getDisplayStatus(status) {
+  if (status === "Exception") return "Normal";
+  return status || "-";
 }
 
 function formatDateTime(value) {
@@ -319,8 +324,37 @@ function formatDateTime(value) {
   return String(value).replace("T", " ").replace(".000Z", "").slice(0, 19);
 }
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
+function formatSpeed(value) {
+  return `${toSafeNumber(value).toFixed(4)} m/s`;
+}
+
+function formatMeter(value) {
+  return `${toSafeNumber(value).toFixed(4)} m`;
+}
+
+function formatMovementCm(value) {
+  return `${(toSafeNumber(value) * 100).toFixed(2)} cm`;
+}
+
+function formatFrameRange(result) {
+  if (!result) return "-";
+
+  const hasStart =
+    result.frame_start !== null && result.frame_start !== undefined;
+  const hasEnd = result.frame_end !== null && result.frame_end !== undefined;
+
+  if (!hasStart && !hasEnd) return "-";
+
+  return `${result.frame_start ?? "-"} ~ ${result.frame_end ?? "-"}`;
+}
+
+function getEventId(event) {
+  return String(
+    event?._id ||
+      event?.event_id ||
+      event?.id ||
+      `${event?.created_at || ""}-${event?.file_name || ""}`,
+  );
 }
 
 function parseCsvLine(line) {
@@ -345,199 +379,351 @@ function parseCsvLine(line) {
   return result;
 }
 
-function downSampleRows(rows, maxPoints = 160) {
-  if (rows.length <= maxPoints) return rows;
-
-  const step = Math.ceil(rows.length / maxPoints);
-  return rows.filter((_, index) => index % step === 0);
-}
-
-function getDistance3d(a, b) {
-  if (!a || !b) return 0;
-
-  const dx = toSafeNumber(b.x) - toSafeNumber(a.x);
-  const dy = toSafeNumber(b.y) - toSafeNumber(a.y);
-  const dz = toSafeNumber(b.z) - toSafeNumber(a.z);
-
-  return Math.sqrt(dx * dx + dy * dy + dz * dz);
-}
-
-function getAfterMovement(rows, startIndex, frameCount = 12) {
-  let total = 0;
-  const endIndex = Math.min(rows.length - 1, startIndex + frameCount);
-
-  for (let i = startIndex; i < endIndex; i += 1) {
-    total += getDistance3d(rows[i], rows[i + 1]);
-  }
-
-  return total;
-}
-
-function movingAverageValues(values, windowSize = 5) {
-  return values.map((_, index) => {
-    const start = Math.max(0, index - Math.floor(windowSize / 2));
-    const end = Math.min(values.length - 1, index + Math.floor(windowSize / 2));
-
-    let sum = 0;
-    let count = 0;
-
-    for (let i = start; i <= end; i += 1) {
-      sum += toSafeNumber(values[i]);
-      count += 1;
-    }
-
-    return count > 0 ? sum / count : 0;
-  });
-}
-
-function buildFallScoreRows(rows) {
-  if (!rows || rows.length < 8) return [];
-
-  const windowSize = Math.min(8, Math.max(3, Math.floor(rows.length / 14)));
-
-  const candidates = rows.map((row, index) => {
-    const next = rows[Math.min(rows.length - 1, index + windowSize)];
-
-    const zDrop = Math.max(0, toSafeNumber(row.z) - toSafeNumber(next.z));
-    const speed = Math.abs(toSafeNumber(row.v));
-    const afterMovement = getAfterMovement(rows, index, 12);
-
-    return {
-      index,
-      frame: row.frame,
-      zDrop,
-      speed,
-      afterMovement,
-    };
-  });
-
-  const maxDrop = Math.max(...candidates.map((item) => item.zDrop), 0.0001);
-  const maxSpeed = Math.max(...candidates.map((item) => item.speed), 0.0001);
-  const maxAfterMovement = Math.max(
-    ...candidates.map((item) => item.afterMovement),
-    0.0001,
-  );
-
-  const rawScoreRows = candidates.map((item) => {
-    const heightDropScore = clamp(item.zDrop / maxDrop, 0, 1);
-    const speedScore = clamp(item.speed / maxSpeed, 0, 1);
-    const stillnessScore =
-      1 - clamp(item.afterMovement / maxAfterMovement, 0, 1);
-
-    const rawFallScore =
-      heightDropScore * 50 + speedScore * 30 + stillnessScore * 20;
-
-    return {
-      index: item.index,
-      frame: item.frame,
-      rawFallScore,
-      heightDropScore: heightDropScore * 100,
-      speedScore: speedScore * 100,
-      stillnessScore: stillnessScore * 100,
-      zDrop: item.zDrop,
-      speed: item.speed,
-      afterMovement: item.afterMovement,
-    };
-  });
-
-  const smoothedRawScores = movingAverageValues(
-    rawScoreRows.map((item) => item.rawFallScore),
-    5,
-  );
-
-  const maxSmoothedScore = Math.max(...smoothedRawScores, 0.0001);
-
-  return rawScoreRows.map((item, index) => ({
-    ...item,
-    rawFallScore: clamp(smoothedRawScores[index], 0, 100),
-    fallScore: clamp(
-      (smoothedRawScores[index] / maxSmoothedScore) * 100,
-      0,
-      100,
-    ),
-  }));
-}
-
-function parseFallScoreFromCsv(text) {
-  const lines = text
+function parseCsvText(text) {
+  const lines = String(text || "")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
 
   if (lines.length < 2) {
     return {
-      rows: [],
+      headers: [],
+      dataLines: [],
+      frameIndex: -1,
+      xIndex: -1,
+      yIndex: -1,
+      zIndex: -1,
+      vIndex: -1,
     };
   }
 
   const headers = parseCsvLine(lines[0]).map((h) => h.trim());
-
-  const findIndex = (name) =>
-    headers.findIndex((header) => header.toLowerCase() === name.toLowerCase());
-
-  const frameIndex = findIndex("frame");
-  const xIndex = findIndex("x");
-  const yIndex = findIndex("y");
-  const zIndex = findIndex("z");
-  const vIndex = findIndex("v");
-
-  if (xIndex === -1 || yIndex === -1 || zIndex === -1 || vIndex === -1) {
-    return {
-      rows: [],
-    };
-  }
-
-  const rawRows = lines.slice(1).map((line, index) => {
-    const cols = parseCsvLine(line);
-
-    return {
-      frame:
-        frameIndex >= 0 && Number.isFinite(Number(cols[frameIndex]))
-          ? Number(cols[frameIndex])
-          : index + 1,
-      x: toSafeNumber(cols[xIndex]),
-      y: toSafeNumber(cols[yIndex]),
-      z: toSafeNumber(cols[zIndex]),
-      v: toSafeNumber(cols[vIndex]),
-    };
-  });
-
-  const scoreRows = buildFallScoreRows(rawRows);
+  const lower = headers.map((h) => h.toLowerCase());
 
   return {
-    rows: downSampleRows(scoreRows),
+    headers,
+    dataLines: lines.slice(1),
+    frameIndex: lower.indexOf("frame"),
+    xIndex: lower.indexOf("x"),
+    yIndex: lower.indexOf("y"),
+    zIndex: lower.indexOf("z"),
+    vIndex: lower.indexOf("v"),
   };
 }
 
-const HEIGHT_RISK_STANDARD = 0.3;
-const SPEED_RISK_STANDARD = 0.35;
-const STILLNESS_RISK_STANDARD = 0.2;
+function getFileBaseName(fileName) {
+  return String(fileName || "uploaded")
+    .replace(/\.csv$/i, "")
+    .replace(/[^\w가-힣.-]/g, "_");
+}
 
-function getRuleBasedFallProbability(result) {
-  if (!result) return 0;
+function buildFrameChunksFromCsv(text, originalFileName) {
+  const parsed = parseCsvText(text);
 
-  const heightDrop = toSafeNumber(result.height_drop);
-  const speedMax = toSafeNumber(result.speed_max);
-  const movementAfter = toSafeNumber(result.movement_after);
-
-  const hasEvidence = heightDrop > 0 || speedMax > 0 || movementAfter > 0;
-
-  if (!hasEvidence) return 0;
-
-  const heightScore = clamp(heightDrop / HEIGHT_RISK_STANDARD, 0, 1);
-  const speedScore = clamp(speedMax / SPEED_RISK_STANDARD, 0, 1);
-
-  let stillnessScore = 0;
-
-  if (movementAfter > 0 && movementAfter <= STILLNESS_RISK_STANDARD) {
-    stillnessScore = 1;
-  } else if (movementAfter > STILLNESS_RISK_STANDARD) {
-    stillnessScore = clamp((0.5 - movementAfter) / 0.3, 0, 1);
+  if (
+    parsed.headers.length === 0 ||
+    parsed.frameIndex === -1 ||
+    parsed.xIndex === -1 ||
+    parsed.yIndex === -1 ||
+    parsed.zIndex === -1 ||
+    parsed.vIndex === -1
+  ) {
+    return {
+      chunks: [],
+      error: "CSV에 frame, x, y, z, v 컬럼이 필요합니다.",
+    };
   }
 
-  const ruleScore = heightScore * 0.5 + speedScore * 0.3 + stillnessScore * 0.2;
+  const rows = parsed.dataLines
+    .map((line) => {
+      const cols = parseCsvLine(line);
+      const frame = Number(cols[parsed.frameIndex]);
 
-  return clamp(ruleScore, 0, 1);
+      return {
+        line,
+        frame,
+        x: toSafeNumber(cols[parsed.xIndex]),
+        y: toSafeNumber(cols[parsed.yIndex]),
+        z: toSafeNumber(cols[parsed.zIndex]),
+        v: toSafeNumber(cols[parsed.vIndex]),
+      };
+    })
+    .filter((row) => Number.isFinite(row.frame));
+
+  const uniqueFrames = [...new Set(rows.map((row) => row.frame))].sort(
+    (a, b) => a - b,
+  );
+
+  if (uniqueFrames.length === 0) {
+    return {
+      chunks: [],
+      error: "frame 값이 올바르지 않습니다.",
+    };
+  }
+
+  const chunks = [];
+  const baseName = getFileBaseName(originalFileName);
+
+  for (let i = 0; i < uniqueFrames.length; i += FRAME_WINDOW_SIZE) {
+    const frameGroup = uniqueFrames.slice(i, i + FRAME_WINDOW_SIZE);
+    const frameSet = new Set(frameGroup);
+
+    const chunkLines = rows
+      .filter((row) => frameSet.has(row.frame))
+      .map((row) => row.line);
+
+    if (chunkLines.length === 0) continue;
+
+    const startFrame = frameGroup[0];
+    const endFrame = frameGroup[frameGroup.length - 1];
+
+    chunks.push({
+      index: chunks.length,
+      startFrame,
+      endFrame,
+      frameCount: frameGroup.length,
+      rowCount: chunkLines.length,
+      secondStart: startFrame / FPS,
+      secondEnd: (endFrame + 1) / FPS,
+      fileName: `${baseName}_frame_${startFrame}_${endFrame}.csv`,
+      csvText: `${parsed.headers.join(",")}\n${chunkLines.join("\n")}\n`,
+    });
+  }
+
+  return {
+    chunks,
+    error: "",
+  };
+}
+
+function StatusBadge({ status }) {
+  const displayStatus = getDisplayStatus(status);
+
+  const className =
+    displayStatus === "Fall Alert"
+      ? "badge danger"
+      : displayStatus === "Normal"
+        ? "badge normal"
+        : "badge";
+
+  return <span className={className}>{displayStatus}</span>;
+}
+
+function AlertText({ alert }) {
+  return alert ? (
+    <span className="alert-true">알림 발생</span>
+  ) : (
+    <span className="alert-false">알림 없음</span>
+  );
+}
+
+function ResultCard({ result }) {
+  if (!result) return null;
+
+  return (
+    <div className="result-box">
+      <div className="result-header">
+        <StatusBadge status={result.status} />
+        <AlertText alert={result.alert} />
+      </div>
+
+      <p className="result-message">{result.message}</p>
+
+      <div className="result-grid">
+        <div>
+          <span>파일명</span>
+          <strong title={result.file_name}>{result.file_name}</strong>
+        </div>
+
+        <div>
+          <span>가장 위험한 프레임</span>
+          <strong>{formatFrameRange(result)}</strong>
+        </div>
+
+        <div>
+          <span>최종 낙상 위험도</span>
+          <strong>{getDisplayFallPercent(result)}%</strong>
+        </div>
+
+        <div>
+          <span>최대 속도</span>
+          <strong>{formatSpeed(result.speed_max)}</strong>
+        </div>
+
+        <div>
+          <span>높이 변화</span>
+          <strong>{formatMeter(result.height_drop)}</strong>
+        </div>
+
+        <div>
+          <span>이후 이동거리</span>
+          <strong>{formatMovementCm(result.movement_after)}</strong>
+        </div>
+
+        <div>
+          <span>분석 구간 수</span>
+          <strong>
+            {result.window_count || result.window_results?.length || "-"}
+          </strong>
+        </div>
+
+        <div>
+          <span>DB 저장</span>
+          <strong>{result.db_saved ? "저장됨" : "저장 안 함"}</strong>
+        </div>
+      </div>
+
+      {result.db_message && <p className="db-message">{result.db_message}</p>}
+    </div>
+  );
+}
+
+function BehaviorAnalysisCard({ result }) {
+  if (!result) return null;
+
+  const isFallAlert = result.status === "Fall Alert";
+
+  return (
+    <section className="card behavior-full-card">
+      <div className="chart-title-row">
+        <div>
+          <h2>
+            {isFallAlert
+              ? "낙상 행동 패턴 및 원인 분석"
+              : "정상 행동 패턴 분석"}
+          </h2>
+          <p className="desc">
+            {isFallAlert
+              ? "낙상 위험 구간, 속도, 높이 변화, 이후 움직임을 기반으로 원인을 추정합니다."
+              : "현재 데이터가 낙상 기준에 도달하지 않은 이유를 분석합니다."}
+          </p>
+        </div>
+
+        <span className="behavior-chip">{result.action_label}</span>
+      </div>
+
+      <div className="behavior-summary">
+        <strong>{result.analysis_summary}</strong>
+        <p>{result.behavior_pattern}</p>
+      </div>
+
+      <div className="behavior-grid">
+        <div>
+          <span>행동 케이스</span>
+          <strong>{result.action_label}</strong>
+        </div>
+
+        <div>
+          <span>추정 방향</span>
+          <strong>{result.direction || "-"}</strong>
+        </div>
+
+        <div>
+          <span>{isFallAlert ? "추정 원인" : "정상 판단 이유"}</span>
+          <strong>{result.likely_cause}</strong>
+        </div>
+      </div>
+
+      <div className="behavior-list-grid">
+        <div>
+          <h4>판단 근거</h4>
+          <ul>
+            {(result.risk_reason || []).length === 0 ? (
+              <li>아직 판단 근거가 없습니다.</li>
+            ) : (
+              result.risk_reason.map((item, index) => (
+                <li key={`reason-${index}`}>{item}</li>
+              ))
+            )}
+          </ul>
+        </div>
+
+        <div>
+          <h4>대응 권장</h4>
+          <ul>
+            {(result.recommendations || []).length === 0 ? (
+              <li>추가 대응 권장 내용이 없습니다.</li>
+            ) : (
+              result.recommendations.map((item, index) => (
+                <li key={`recommend-${index}`}>{item}</li>
+              ))
+            )}
+          </ul>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ProbabilityChart({ result }) {
+  if (!result) return null;
+
+  const percent = Math.max(0, Math.min(100, getDisplayFallPercent(result)));
+
+  return (
+    <div className="chart-card">
+      <div className="chart-title-row">
+        <div>
+          <h3>낙상 위험도</h3>
+          <p>전체 파일과 10프레임 분석 결과를 같은 기준으로 표시합니다.</p>
+        </div>
+        <StatusBadge status={result.status} />
+      </div>
+
+      <div className="probability-graph">
+        <div className="probability-track">
+          <div
+            className={`probability-fill ${
+              percent >= 70
+                ? "danger-fill"
+                : percent >= 40
+                  ? "warning-fill"
+                  : "normal-fill"
+            }`}
+            style={{ width: `${percent}%` }}
+          />
+        </div>
+
+        <div className="probability-info">
+          <strong>{percent}%</strong>
+          <span>낙상 위험도: {getRiskLevelText(percent)}</span>
+        </div>
+      </div>
+
+      <div className="scale-row">
+        <span>0%</span>
+        <span>40%</span>
+        <span>70%</span>
+        <span>100%</span>
+      </div>
+    </div>
+  );
+}
+
+function getTimelineRows(result, liveResults) {
+  if (liveResults && liveResults.length > 0) {
+    return [...liveResults].reverse().map((item, index) => ({
+      index,
+      frame: item.frame_end ?? index,
+      frame_start: item.frame_start,
+      frame_end: item.frame_end,
+      displayScore: getDisplayFallPercent(item),
+      status: item.status,
+    }));
+  }
+
+  if (result?.window_results?.length > 0) {
+    return result.window_results.map((item, index) => ({
+      index,
+      frame: item.frame_end ?? index,
+      frame_start: item.frame_start,
+      frame_end: item.frame_end,
+      displayScore: getDisplayFallPercent(item),
+      status: item.status,
+    }));
+  }
+
+  return [];
 }
 
 function getXByIndex(index, dataLength, width, padding) {
@@ -550,47 +736,11 @@ function getYByScore(score, height, padding) {
   return padding.top + (1 - clamp(score, 0, 100) / 100) * usableHeight;
 }
 
-function buildDisplayScoreData(data, result, threshold = 70) {
-  const modelFallPercent = getDisplayFallPercent(result);
-  const ruleFallPercent = Math.round(getRuleBasedFallProbability(result) * 100);
-  const isFallAlert = result?.status === "Fall Alert";
-
-  let targetPeak = 0;
-
-  if (isFallAlert) {
-    targetPeak = Math.max(modelFallPercent, threshold + 12);
-  } else {
-    const sensorPeak = ruleFallPercent > 0 ? ruleFallPercent : modelFallPercent;
-    targetPeak = Math.min(sensorPeak, threshold - 12);
-
-    if (targetPeak < 20 && data.length > 0) {
-      targetPeak = 20;
-    }
-  }
-
-  const safeTargetPeak = clamp(targetPeak, 0, 100);
-
-  const maxScore = Math.max(
-    ...data.map((item) => toSafeNumber(item.fallScore)),
-    0.0001,
-  );
-
-  return data.map((item) => ({
-    ...item,
-    displayScore: clamp(
-      (toSafeNumber(item.fallScore) / maxScore) * safeTargetPeak,
-      0,
-      100,
-    ),
-  }));
-}
-
 function getScoreSvgPoints(data, width, height, padding) {
   return data
     .map((item, index) => {
       const x = getXByIndex(index, data.length, width, padding);
       const y = getYByScore(item.displayScore, height, padding);
-
       return `${x},${y}`;
     })
     .join(" ");
@@ -600,10 +750,7 @@ function detectDisplayFallZone(displayData, threshold = 70) {
   if (!displayData || displayData.length === 0) return null;
 
   const overIndexes = displayData
-    .map((item, index) => ({
-      item,
-      index,
-    }))
+    .map((item, index) => ({ item, index }))
     .filter(({ item }) => item.displayScore >= threshold);
 
   if (overIndexes.length === 0) return null;
@@ -631,9 +778,9 @@ function detectDisplayFallZone(displayData, threshold = 70) {
   }
 
   return {
-    startFrame: displayData[left].frame,
+    startFrame: displayData[left].frame_start,
     centerFrame: best.item.frame,
-    endFrame: displayData[right].frame,
+    endFrame: displayData[right].frame_end,
     peakScore: Math.round(best.item.displayScore),
     startIndex: left,
     centerIndex: best.index,
@@ -641,102 +788,22 @@ function detectDisplayFallZone(displayData, threshold = 70) {
   };
 }
 
-function StatusBadge({ status }) {
-  const displayStatus = getDisplayStatus(status);
+function FallScoreChart({ result, liveResults }) {
+  if (!result && (!liveResults || liveResults.length === 0)) return null;
 
-  const cls =
-    displayStatus === "Fall Alert"
-      ? "badge danger"
-      : displayStatus === "Normal"
-        ? "badge normal"
-        : "badge";
-
-  return <span className={cls}>{displayStatus}</span>;
-}
-
-function AlertText({ alert }) {
-  return alert ? (
-    <span className="alert-true">알림 발생</span>
-  ) : (
-    <span className="alert-false">알림 없음</span>
-  );
-}
-
-function ProbabilityChart({ result }) {
-  if (!result) return null;
-
-  const safePercent = Math.max(0, Math.min(100, getDisplayFallPercent(result)));
-  const levelText = getRiskLevelText(safePercent);
-
-  return (
-    <div className="chart-card">
-      <div className="chart-title-row">
-        <div>
-          <h3>낙상 위험도</h3>
-          <p>
-            AI 모델이 업로드된 센서 데이터를 분석해 낙상 위험 수준을 판단한
-            결과입니다.
-          </p>
-        </div>
-        <StatusBadge status={result.status} />
-      </div>
-
-      <div className="probability-graph">
-        <div className="probability-track">
-          <div
-            className={`probability-fill ${
-              safePercent >= 85
-                ? "danger-fill"
-                : safePercent >= 60
-                  ? "warning-fill"
-                  : "normal-fill"
-            }`}
-            style={{ width: `${safePercent}%` }}
-          />
-        </div>
-
-        <div className="probability-info">
-          <strong>{safePercent}%</strong>
-          <span>낙상 위험도: {levelText}</span>
-        </div>
-      </div>
-
-      <div className="scale-row">
-        <span>0%</span>
-        <span>30%</span>
-        <span>60%</span>
-        <span>85%</span>
-        <span>100%</span>
-      </div>
-
-      {result.status !== "Fall Alert" && (
-        <p className="db-message">
-          정상 행동으로 분류되었습니다. 낙상 알림이 아니므로 DB에는 저장하지
-          않습니다.
-        </p>
-      )}
-    </div>
-  );
-}
-
-function FallScoreChart({ data, result }) {
-  if (!result) return null;
+  const data = getTimelineRows(result, liveResults);
 
   if (!data || data.length === 0) {
     return (
       <div className="chart-card">
         <h3>프레임별 낙상 판정 그래프</h3>
-        <p className="empty-chart">
-          과거 로그는 원본 CSV 프레임 데이터가 저장되어 있지 않아 프레임별
-          그래프를 표시할 수 없습니다.
-        </p>
+        <p className="empty-chart">아직 분석된 10프레임 구간이 없습니다.</p>
       </div>
     );
   }
 
   const threshold = 70;
-  const displayData = buildDisplayScoreData(data, result, threshold);
-  const displayZone = detectDisplayFallZone(displayData, threshold);
+  const displayZone = detectDisplayFallZone(data, threshold);
 
   const width = 760;
   const height = 280;
@@ -747,27 +814,26 @@ function FallScoreChart({ data, result }) {
     left: 54,
   };
 
-  const firstFrame = displayData[0]?.frame ?? 1;
-  const lastFrame =
-    displayData[displayData.length - 1]?.frame ?? displayData.length;
+  const firstFrame = data[0]?.frame_start ?? 0;
+  const lastFrame = data[data.length - 1]?.frame_end ?? data.length;
 
-  const modelFallPercent = getDisplayFallPercent(result);
-  const isFallAlert = result.status === "Fall Alert";
-  const showZone = isFallAlert && displayZone;
+  const showZone = Boolean(displayZone);
   const thresholdY = getYByScore(threshold, height, padding);
 
   const zoneX1 = showZone
-    ? getXByIndex(displayZone.startIndex, displayData.length, width, padding)
+    ? getXByIndex(displayZone.startIndex, data.length, width, padding)
     : 0;
+
   const zoneX2 = showZone
-    ? getXByIndex(displayZone.endIndex, displayData.length, width, padding)
+    ? getXByIndex(displayZone.endIndex, data.length, width, padding)
     : 0;
+
   const centerX = showZone
-    ? getXByIndex(displayZone.centerIndex, displayData.length, width, padding)
+    ? getXByIndex(displayZone.centerIndex, data.length, width, padding)
     : 0;
 
   const maxDisplayScore = Math.round(
-    Math.max(...displayData.map((item) => item.displayScore), 0),
+    Math.max(...data.map((item) => item.displayScore), 0),
   );
 
   return (
@@ -775,10 +841,7 @@ function FallScoreChart({ data, result }) {
       <div className="chart-title-row">
         <div>
           <h3>프레임별 낙상 판정 그래프</h3>
-          <p>
-            프레임별 센서 패턴을 낙상 판정 점수로 변환해 보여줍니다. 점수가
-            기준선 70%를 넘으면 낙상 의심 구간으로 표시합니다.
-          </p>
+          <p>10프레임 분석 결과가 실시간으로 선형차트에 반영됩니다.</p>
         </div>
 
         {showZone ? (
@@ -794,6 +857,7 @@ function FallScoreChart({ data, result }) {
           viewBox={`0 0 ${width} ${height}`}
           role="img"
           aria-label="프레임별 낙상 판정 그래프"
+          preserveAspectRatio="none"
         >
           {showZone && (
             <>
@@ -842,22 +906,6 @@ function FallScoreChart({ data, result }) {
 
           <line
             x1={padding.left}
-            y1={padding.top}
-            x2={width - padding.right}
-            y2={padding.top}
-            className="grid-line"
-          />
-
-          <line
-            x1={padding.left}
-            y1={height / 2}
-            x2={width - padding.right}
-            y2={height / 2}
-            className="grid-line"
-          />
-
-          <line
-            x1={padding.left}
             y1={thresholdY}
             x2={width - padding.right}
             y2={thresholdY}
@@ -873,7 +921,7 @@ function FallScoreChart({ data, result }) {
           </text>
 
           <polyline
-            points={getScoreSvgPoints(displayData, width, height, padding)}
+            points={getScoreSvgPoints(data, width, height, padding)}
             className="fall-score-line"
           />
 
@@ -900,17 +948,13 @@ function FallScoreChart({ data, result }) {
         </svg>
       </div>
 
-      <div className="fall-score-legend">
-        <span className="legend-score">낙상 판정 점수</span>
-        <span className="legend-threshold">낙상 기준선 70%</span>
-        {showZone && <span className="legend-fall">낙상 의심 구간</span>}
-      </div>
-
       <div className="fall-metric-grid">
         <div>
-          <span>모델 낙상 위험도</span>
-          <strong>{modelFallPercent}%</strong>
-          <p>최종 AI 판단 기준</p>
+          <span>최종 낙상 위험도</span>
+          <strong>
+            {result ? getDisplayFallPercent(result) : maxDisplayScore}%
+          </strong>
+          <p>가장 위험한 10프레임 기준</p>
         </div>
 
         <div>
@@ -920,81 +964,48 @@ function FallScoreChart({ data, result }) {
         </div>
 
         <div>
-          <span>낙상 기준선</span>
-          <strong>{threshold}%</strong>
-          <p>넘으면 낙상 의심</p>
+          <span>분석 단위</span>
+          <strong>{FRAME_WINDOW_SIZE}프레임</strong>
+          <p>약 {((FRAME_WINDOW_SIZE / FPS) * 2).toFixed(1)}초 단위</p>
         </div>
 
         <div>
-          <span>최종 판단</span>
-          <strong>{getDisplayStatusText(result.status)}</strong>
-          <p>{isFallAlert ? "Fall Alert 판단" : "정상 행동 판단"}</p>
+          <span>분석 구간</span>
+          <strong>{data.length}개</strong>
+          <p>실시간 구간 누적</p>
         </div>
       </div>
 
       {showZone ? (
         <p className="fall-zone-note">
-          그래프의 낙상 판정 점수가 기준선 70%를 초과했기 때문에 frame{" "}
-          {displayZone.startFrame} ~ {displayZone.endFrame} 구간을 낙상 의심
-          구간으로 표시했습니다. 중심 프레임은 frame {displayZone.centerFrame}
-          입니다.
+          낙상 의심 구간: frame {displayZone.startFrame} ~{" "}
+          {displayZone.endFrame}
         </p>
       ) : (
         <p className="normal-zone-note">
-          그래프는 업로드된 CSV의 센서 패턴 흐름을 참고용으로 표시합니다. 최종
-          판단은 {getDisplayStatusText(result.status)}이며, Fall Alert가
-          아니므로 DB에는 저장하지 않습니다.
+          낙상 기준선을 넘은 구간이 없어 정상 흐름으로 표시됩니다.
         </p>
       )}
     </div>
   );
 }
 
-function DecisionEvidenceChart({ result }) {
-  const fallProb = getDisplayFallProbability(result);
-  const heightDrop = toSafeNumber(result?.height_drop);
-  const speedMax = toSafeNumber(result?.speed_max);
-  const movementAfter = toSafeNumber(result?.movement_after);
+function EvidenceChart({ result }) {
+  if (!result) return null;
 
-  const getLevel = (type, value) => {
-    if (!result) return "normal";
-
-    if (type === "fallProb") {
-      if (value >= 0.7) return "danger";
-      if (value >= 0.4) return "warning";
-      return "normal";
-    }
-
-    if (type === "heightDrop") {
-      if (value >= 0.8) return "danger";
-      if (value >= 0.4) return "warning";
-      return "normal";
-    }
-
-    if (type === "speedMax") {
-      if (value >= 1.2) return "danger";
-      if (value >= 0.6) return "warning";
-      return "normal";
-    }
-
-    if (type === "movementAfter") {
-      if (value <= 0.2) return "danger";
-      if (value <= 0.5) return "warning";
-      return "normal";
-    }
-
-    return "normal";
-  };
+  const fallProb = getModelFallProbability(result);
+  const heightDrop = toSafeNumber(result.height_drop);
+  const speedMax = toSafeNumber(result.speed_max);
+  const movementAfter = toSafeNumber(result.movement_after);
 
   const rows = [
     {
       key: "fallProb",
       label: "낙상 위험도",
-      desc: "AI 모델이 낙상으로 판단한 정도",
+      desc: "가장 위험한 10프레임 구간 기준",
       value: fallProb,
       max: 1,
-      displayValue: result ? `${Math.round(fallProb * 100)}%` : "-",
-      level: getLevel("fallProb", fallProb),
+      displayValue: `${Math.round(fallProb * 100)}%`,
     },
     {
       key: "heightDrop",
@@ -1002,8 +1013,7 @@ function DecisionEvidenceChart({ result }) {
       desc: "대상의 높이 변화 정도",
       value: heightDrop,
       max: 1.5,
-      displayValue: result ? `${heightDrop.toFixed(4)} m` : "-",
-      level: getLevel("heightDrop", heightDrop),
+      displayValue: `${heightDrop.toFixed(4)} m`,
     },
     {
       key: "speedMax",
@@ -1011,8 +1021,7 @@ function DecisionEvidenceChart({ result }) {
       desc: "순간적으로 움직인 최대 속도",
       value: speedMax,
       max: 2,
-      displayValue: result ? `${speedMax.toFixed(4)} m/s` : "-",
-      level: getLevel("speedMax", speedMax),
+      displayValue: `${speedMax.toFixed(4)} m/s`,
     },
     {
       key: "movementAfter",
@@ -1020,123 +1029,23 @@ function DecisionEvidenceChart({ result }) {
       desc: "동작 이후 대상자가 움직인 거리",
       value: movementAfter,
       max: 1,
-      displayValue: result ? `${(movementAfter * 100).toFixed(2)} cm` : "-",
-      level: getLevel("movementAfter", movementAfter),
+      displayValue: `${(movementAfter * 100).toFixed(2)} cm`,
     },
   ];
 
-  const getDecisionReason = () => {
-    if (!result) {
-      return {
-        title: "아직 예측 전입니다.",
-        reasons: ["CSV 파일을 업로드하면 판단 근거가 표시됩니다."],
-      };
-    }
-
-    const reasons = [];
-    const isFallAlert = result.status === "Fall Alert";
-    const movementCm = movementAfter * 100;
-
-    if (isFallAlert) {
-      if (fallProb >= 0.7) {
-        reasons.push("AI 모델의 낙상 위험도가 높게 나왔습니다.");
-      }
-
-      if (heightDrop >= 0.8) {
-        reasons.push("높이 변화가 크게 나타나 낙상 패턴과 유사합니다.");
-      } else if (heightDrop >= 0.4) {
-        reasons.push("높이 변화가 일부 감지되었습니다.");
-      }
-
-      if (speedMax >= 1.2) {
-        reasons.push("순간 속도가 높아 갑작스러운 움직임이 감지되었습니다.");
-      } else if (speedMax >= 0.6) {
-        reasons.push("움직임 속도 변화가 감지되었습니다.");
-      }
-
-      if (movementAfter <= 0.2) {
-        reasons.push(
-          `동작 이후 이동거리가 ${movementCm.toFixed(
-            2,
-          )}cm로 낮아 움직임이 거의 없는 패턴이 나타났습니다.`,
-        );
-      }
-
-      if (reasons.length === 0) {
-        reasons.push(
-          "전체 센서 패턴이 모델 기준에서 낙상 알림으로 분류되었습니다.",
-        );
-      }
-
-      return {
-        title: "낙상으로 판단한 이유",
-        reasons,
-      };
-    }
-
-    if (fallProb <= 0.01) {
-      reasons.push("AI 모델의 낙상 위험도가 0%로 낮게 나왔습니다.");
-    } else if (fallProb < 0.3) {
-      reasons.push("AI 모델의 낙상 위험도가 낮은 수준입니다.");
-    } else {
-      reasons.push("AI 모델의 낙상 위험도가 알림 기준에 도달하지 않았습니다.");
-    }
-
-    if (heightDrop >= 0.4) {
-      reasons.push(
-        "높이 변화가 나타났지만, 모델은 이를 낙상이 아닌 정상적인 자세 변화로 판단했습니다.",
-      );
-    } else {
-      reasons.push("높이 변화가 크지 않아 낙상 가능성이 낮습니다.");
-    }
-
-    if (speedMax >= 0.6) {
-      reasons.push(
-        "속도 변화가 일부 있었지만, 전체 패턴이 낙상 알림 기준에는 도달하지 않았습니다.",
-      );
-    } else {
-      reasons.push("움직임 속도가 크지 않았습니다.");
-    }
-
-    if (movementAfter <= 0.2) {
-      reasons.push(
-        `동작 이후 이동거리는 ${movementCm.toFixed(
-          2,
-        )}cm로 작게 나타났지만, 최종 모델 판단은 정상 행동입니다.`,
-      );
-    } else {
-      reasons.push(
-        `동작 이후 이동거리가 ${movementCm.toFixed(2)}cm로 확인되었습니다.`,
-      );
-    }
-
-    return {
-      title: "정상으로 판단한 이유",
-      reasons: [
-        ...reasons,
-        "최종 판단이 정상 행동이므로 Fall Alert로 처리하지 않았고 DB에도 저장하지 않았습니다.",
-      ],
-    };
-  };
-
-  const decision = getDecisionReason();
+  const isFallAlert = result.status === "Fall Alert";
 
   return (
     <div className="chart-card evidence-card">
       <h3>낙상 판단 근거 그래프</h3>
-      <p>
-        낙상 위험도, 높이 변화, 최대 속도, 이후 이동거리를 기준으로 모델이 왜
-        낙상/정상으로 판단했는지 보여줍니다.
-      </p>
+      <p>위험도, 높이 변화, 최대 속도, 이후 이동거리를 보여줍니다.</p>
 
       <div className="bar-chart evidence-list">
         {rows.map((item) => {
-          const width = result
-            ? Math.max(
-                4,
-                Math.min(100, (Number(item.value || 0) / item.max) * 100),
-              )
-            : 4;
+          const width = Math.max(
+            4,
+            Math.min(100, (item.value / item.max) * 100),
+          );
 
           return (
             <div className="evidence-item" key={item.key}>
@@ -1153,7 +1062,13 @@ function DecisionEvidenceChart({ result }) {
 
               <div className="bar-track">
                 <div
-                  className={`bar-fill evidence-${item.level}`}
+                  className={`bar-fill ${
+                    width >= 70
+                      ? "evidence-danger"
+                      : width >= 40
+                        ? "evidence-warning"
+                        : "evidence-normal"
+                  }`}
                   style={{ width: `${width}%` }}
                 />
               </div>
@@ -1163,18 +1078,27 @@ function DecisionEvidenceChart({ result }) {
       </div>
 
       <div className="evidence-summary">
-        <h4>{decision.title}</h4>
-
-        {result && (
-          <p className="decision-status">
-            최종 판단: <strong>{getDisplayStatusText(result.status)}</strong>
-          </p>
-        )}
-
+        <h4>{isFallAlert ? "낙상으로 판단한 이유" : "정상으로 판단한 이유"}</h4>
+        <p className="decision-status">
+          최종 판단: <strong>{getDisplayStatus(result.status)}</strong>
+        </p>
         <ul>
-          {decision.reasons.map((reason, index) => (
-            <li key={index}>{reason}</li>
-          ))}
+          {isFallAlert ? (
+            <>
+              <li>10프레임 구간 중 낙상 기준을 넘는 패턴이 감지되었습니다.</li>
+              <li>
+                전체 파일과 실시간 분석은 같은 최고 위험 구간 기준으로
+                표시됩니다.
+              </li>
+            </>
+          ) : (
+            <>
+              <li>
+                모든 10프레임 구간이 Fall Alert 기준에 도달하지 않았습니다.
+              </li>
+              <li>정상 행동으로 처리되어 DB에는 저장하지 않습니다.</li>
+            </>
+          )}
         </ul>
       </div>
     </div>
@@ -1216,18 +1140,196 @@ function RecentEventChart({ events }) {
   );
 }
 
+function RealtimePanel({
+  selectedFile,
+  frameChunks,
+  realtimeRunning,
+  currentChunkIndex,
+  liveResults,
+  livePage,
+  setLivePage,
+}) {
+  const currentChunk =
+    currentChunkIndex >= 0 ? frameChunks[currentChunkIndex] : null;
+
+  const totalPages = Math.max(
+    1,
+    Math.ceil(liveResults.length / LIVE_PAGE_SIZE),
+  );
+  const safePage = Math.min(Math.max(1, livePage), totalPages);
+
+  const startIndex = (safePage - 1) * LIVE_PAGE_SIZE;
+  const endIndex = startIndex + LIVE_PAGE_SIZE;
+  const visibleRows = liveResults.slice(startIndex, endIndex);
+
+  React.useEffect(() => {
+    if (livePage > totalPages) {
+      setLivePage(totalPages);
+    }
+  }, [livePage, totalPages, setLivePage]);
+
+  return (
+    <div className="realtime-panel compact-realtime-panel">
+      <div className="realtime-title-row">
+        <div>
+          <h3>10프레임 실시간 시뮬레이션</h3>
+          <p>
+            전체 구간은 모두 보관하고, 표는 5개씩 페이지로 나누어 표시합니다.
+          </p>
+        </div>
+
+        <span className={realtimeRunning ? "live-chip on" : "live-chip"}>
+          {realtimeRunning ? "실시간 실행 중" : "대기 중"}
+        </span>
+      </div>
+
+      <div className="realtime-grid compact-realtime-grid">
+        <div>
+          <span>선택 파일</span>
+          <strong>{selectedFile?.name || "-"}</strong>
+        </div>
+
+        <div>
+          <span>분석 단위</span>
+          <strong>{FRAME_WINDOW_SIZE}프레임</strong>
+        </div>
+
+        <div>
+          <span>전체 구간</span>
+          <strong>{frameChunks.length}</strong>
+        </div>
+
+        <div>
+          <span>현재 구간</span>
+          <strong>
+            {currentChunk
+              ? `${currentChunk.index + 1} / ${frameChunks.length}`
+              : "-"}
+          </strong>
+        </div>
+      </div>
+
+      <div className="compact-live-summary">
+        <span>
+          현재 프레임:{" "}
+          <strong>
+            {currentChunk
+              ? `${currentChunk.startFrame} ~ ${currentChunk.endFrame}`
+              : "-"}
+          </strong>
+        </span>
+
+        <span>
+          누적 분석: <strong>{liveResults.length}</strong>개 구간
+        </span>
+
+        <span>
+          현재 페이지:{" "}
+          <strong>
+            {safePage} / {totalPages}
+          </strong>
+        </span>
+      </div>
+
+      <div className="table-wrap realtime-table-wrap compact-live-table-wrap">
+        <table className="history-log-table compact-live-table">
+          <thead>
+            <tr>
+              <th>구간</th>
+              <th>프레임</th>
+              <th>상태</th>
+              <th>위험도</th>
+              <th>속도</th>
+              <th>높이</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {visibleRows.length === 0 ? (
+              <tr>
+                <td colSpan="6" className="empty">
+                  아직 실시간 분석 결과가 없습니다.
+                </td>
+              </tr>
+            ) : (
+              visibleRows.map((item) => (
+                <tr
+                  key={`${item.chunk_index}-${item.frame_start}-${item.frame_end}`}
+                >
+                  <td>{item.chunk_index + 1}</td>
+
+                  <td>
+                    {item.frame_start} ~ {item.frame_end}
+                  </td>
+
+                  <td>
+                    <StatusBadge status={item.status} />
+                  </td>
+
+                  <td>{getDisplayFallPercent(item)}%</td>
+
+                  <td>{formatSpeed(item.speed_max)}</td>
+
+                  <td>{formatMeter(item.height_drop)}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="live-pagination">
+        <button
+          type="button"
+          onClick={() => setLivePage((page) => Math.max(1, page - 1))}
+          disabled={safePage <= 1}
+        >
+          &lt;
+        </button>
+
+        <span>
+          {safePage} / {totalPages}
+        </span>
+
+        <button
+          type="button"
+          onClick={() => setLivePage((page) => Math.min(totalPages, page + 1))}
+          disabled={safePage >= totalPages}
+        >
+          &gt;
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function FallDashboard() {
   const [serverInfo, setServerInfo] = React.useState(null);
-  const [stats, setStats] = React.useState(null);
+  const [fallInfo, setFallInfo] = React.useState(null);
+
+  const [stats, setStats] = React.useState({
+    total_events: 0,
+    fall_alert_count: 0,
+  });
+
   const [events, setEvents] = React.useState([]);
   const [eventPage, setEventPage] = React.useState(1);
   const [selectedEventId, setSelectedEventId] = React.useState(null);
 
   const [selectedFile, setSelectedFile] = React.useState(null);
+  const [csvText, setCsvText] = React.useState("");
+  const [frameChunks, setFrameChunks] = React.useState([]);
+
   const [predictResult, setPredictResult] = React.useState(null);
-  const [fallScoreData, setFallScoreData] = React.useState([]);
-  const [loading, setLoading] = React.useState(false);
   const [message, setMessage] = React.useState("");
+
+  const [loading, setLoading] = React.useState(false);
+  const [realtimeRunning, setRealtimeRunning] = React.useState(false);
+  const [currentChunkIndex, setCurrentChunkIndex] = React.useState(-1);
+  const [liveResults, setLiveResults] = React.useState([]);
+  const [livePage, setLivePage] = React.useState(1);
+
+  const realtimeRunningRef = React.useRef(false);
 
   const totalPages = Math.max(1, Math.ceil(events.length / EVENT_PAGE_SIZE));
   const safeEventPage = Math.min(eventPage, totalPages);
@@ -1236,52 +1338,57 @@ function FallDashboard() {
     safeEventPage * EVENT_PAGE_SIZE,
   );
 
-  const loadServerInfo = async () => {
+  const refreshAll = async () => {
     try {
-      const res = await apiGet("/health");
-      setServerInfo(res.data);
+      const healthRes = await apiGet("/health");
+      setServerInfo(healthRes.data);
+      setMessage("");
+
+      try {
+        const fallHealthRes = await apiGet("/fall/health");
+        setFallInfo(fallHealthRes.data);
+      } catch (err) {
+        setFallInfo(null);
+      }
+
+      try {
+        const statsRes = await apiGet("/stats");
+        setStats(statsRes.data);
+      } catch (err) {
+        setStats({
+          total_events: 0,
+          fall_alert_count: 0,
+        });
+      }
+
+      try {
+        const eventsRes = await apiGet("/events?limit=50");
+        const list = eventsRes.data.events || [];
+        setEvents(list.map((item) => normalizeFallResult(item)));
+        setEventPage(1);
+      } catch (err) {
+        setEvents([]);
+      }
     } catch (err) {
       setServerInfo(null);
-      setMessage(
-        "FastAPI 서버에 연결할 수 없습니다. 백엔드가 켜져 있는지 확인하세요.",
-      );
-    }
-  };
-
-  const loadStats = async () => {
-    try {
-      const res = await apiGet("/stats");
-      setStats(res.data);
-    } catch (err) {
-      setStats(null);
-    }
-  };
-
-  const loadEvents = async () => {
-    try {
-      const res = await apiGet("/events?limit=50");
-      const list = res.data.events || [];
-      const normalizedList = list.map((event) =>
-        normalizeFallResult(event, event.file_name || event.filename || "-"),
-      );
-
-      setEvents(normalizedList);
-      setEventPage(1);
-    } catch (err) {
+      setFallInfo(null);
+      setStats({
+        total_events: 0,
+        fall_alert_count: 0,
+      });
       setEvents([]);
-      setEventPage(1);
+      setMessage(
+        `백엔드 연결 실패: FastAPI 서버를 먼저 켜야 합니다. (${getErrorMessage(err)})`,
+      );
     }
-  };
-
-  const refreshAll = async () => {
-    resetActiveApiBaseUrl();
-    await loadServerInfo();
-    await loadStats();
-    await loadEvents();
   };
 
   React.useEffect(() => {
     refreshAll();
+
+    return () => {
+      realtimeRunningRef.current = false;
+    };
   }, []);
 
   React.useEffect(() => {
@@ -1293,10 +1400,17 @@ function FallDashboard() {
   const handleFileChange = (e) => {
     const file = e.target.files[0];
 
-    setSelectedFile(file);
+    realtimeRunningRef.current = false;
+
+    setSelectedFile(file || null);
+    setCsvText("");
+    setFrameChunks([]);
     setPredictResult(null);
     setMessage("");
-    setFallScoreData([]);
+    setLiveResults([]);
+    setLivePage(1);
+    setCurrentChunkIndex(-1);
+    setRealtimeRunning(false);
     setSelectedEventId(null);
 
     if (!file) return;
@@ -1304,53 +1418,243 @@ function FallDashboard() {
     const reader = new FileReader();
 
     reader.onload = (event) => {
-      const text = event.target.result;
-      const parsed = parseFallScoreFromCsv(text);
+      const text = String(event.target.result || "");
+      const chunkResult = buildFrameChunksFromCsv(text, file.name);
 
-      setFallScoreData(parsed.rows);
+      setCsvText(text);
+
+      if (chunkResult.error) {
+        setFrameChunks([]);
+        setMessage(chunkResult.error);
+      } else {
+        setFrameChunks(chunkResult.chunks);
+        setMessage(
+          `CSV를 10프레임 단위로 ${chunkResult.chunks.length}개 구간으로 나눴습니다.`,
+        );
+      }
     };
 
     reader.onerror = () => {
-      setFallScoreData([]);
+      setCsvText("");
+      setFrameChunks([]);
+      setMessage("CSV 파일을 읽는 중 오류가 발생했습니다.");
     };
 
     reader.readAsText(file);
   };
 
-  const handlePredict = async () => {
+  const predictCsvChunk = async (chunk) => {
+    const blob = new Blob([chunk.csvText], {
+      type: "text/csv;charset=utf-8",
+    });
+
+    const chunkFile = new File([blob], chunk.fileName, {
+      type: "text/csv",
+    });
+
+    const formData = new FormData();
+    formData.append("file", chunkFile);
+
+    const res = await apiPostForm("/predict", formData, false);
+    const normalized = normalizeFallResult(res.data, chunk.fileName);
+
+    return {
+      ...normalized,
+      chunk_index: chunk.index,
+      frame_start: chunk.startFrame,
+      frame_end: chunk.endFrame,
+      frame_count: chunk.frameCount,
+      row_count: chunk.rowCount,
+      second_start: chunk.secondStart,
+      second_end: chunk.secondEnd,
+    };
+  };
+
+  const runWholeFileAggregatePredict = async (saveEvent = true) => {
+    const formData = new FormData();
+    formData.append("file", selectedFile);
+
+    const res = await apiPostForm("/predict", formData, saveEvent);
+    return normalizeFallResult(res.data, selectedFile.name);
+  };
+
+  const handlePredictWholeFile = async () => {
     if (!selectedFile) {
       setMessage("먼저 CSV 파일을 선택하세요.");
       return;
     }
 
-    const formData = new FormData();
-    formData.append("file", selectedFile);
+    realtimeRunningRef.current = false;
 
     setLoading(true);
+    setRealtimeRunning(false);
     setMessage("");
 
     try {
-      const res = await apiPostForm("/predict", formData);
-      const normalizedResult = normalizeFallResult(res.data, selectedFile.name);
+      const normalizedResult = await runWholeFileAggregatePredict(true);
 
       setPredictResult(normalizedResult);
       setSelectedEventId(null);
 
+      if (normalizedResult.window_results?.length > 0) {
+        setLiveResults([...normalizedResult.window_results].reverse());
+        setLivePage(1);
+      }
+
       if (normalizedResult.status === "Error") {
         setMessage(`예측 오류: ${normalizedResult.message}`);
       } else if (normalizedResult.status === "Fall Alert") {
-        setMessage("낙상 알림이 감지되어 저장했습니다.");
+        setMessage(
+          "전체 CSV를 10프레임 단위로 집계한 결과 낙상 알림이 감지되었습니다.",
+        );
       } else {
-        setMessage("정상 행동으로 판단되었습니다. DB에는 저장하지 않습니다.");
+        setMessage(
+          "전체 CSV를 10프레임 단위로 집계한 결과 정상 행동으로 판단되었습니다.",
+        );
       }
 
-      await loadStats();
-      await loadEvents();
+      await refreshAll();
     } catch (err) {
-      console.error("예측 요청 실패:", err);
-      setMessage("예측 요청 중 오류가 발생했습니다.");
+      setMessage(`예측 요청 실패: ${getErrorMessage(err)}`);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRealtimePredict = async () => {
+    if (!selectedFile || !csvText) {
+      setMessage("먼저 CSV 파일을 선택하세요.");
+      return;
+    }
+
+    if (frameChunks.length === 0) {
+      setMessage("10프레임 단위로 나눌 수 있는 frame 데이터가 없습니다.");
+      return;
+    }
+
+    realtimeRunningRef.current = true;
+
+    setLoading(true);
+    setRealtimeRunning(true);
+    setLiveResults([]);
+    setLivePage(1);
+    setPredictResult(null);
+    setSelectedEventId(null);
+    setCurrentChunkIndex(0);
+    setMessage("10프레임 단위 실시간 시뮬레이션을 시작합니다.");
+
+    let firstFall = null;
+
+    for (let i = 0; i < frameChunks.length; i += 1) {
+      if (!realtimeRunningRef.current) break;
+
+      const chunk = frameChunks[i];
+      setCurrentChunkIndex(i);
+
+      try {
+        const result = await predictCsvChunk(chunk);
+
+        setPredictResult(result);
+        setLiveResults((prev) => [result, ...prev]);
+        setLivePage(1);
+
+        if (result.status === "Fall Alert" && !firstFall) {
+          firstFall = result;
+          setMessage(
+            `낙상 의심 구간 감지: frame ${result.frame_start} ~ ${result.frame_end}`,
+          );
+        }
+      } catch (err) {
+        const fallbackResult = normalizeFallResult(
+          {
+            status: "Error",
+            alert: false,
+            message: `이 10프레임 구간 분석 실패: ${getErrorMessage(err)}`,
+            file_name: chunk.fileName,
+            frame_start: chunk.startFrame,
+            frame_end: chunk.endFrame,
+            frame_count: chunk.frameCount,
+            point_count: chunk.rowCount,
+          },
+          chunk.fileName,
+        );
+
+        const safeResult = {
+          ...fallbackResult,
+          chunk_index: chunk.index,
+          frame_start: chunk.startFrame,
+          frame_end: chunk.endFrame,
+          frame_count: chunk.frameCount,
+          row_count: chunk.rowCount,
+        };
+
+        setPredictResult(safeResult);
+        setLiveResults((prev) => [safeResult, ...prev]);
+        setLivePage(1);
+      }
+
+      await sleep(REALTIME_INTERVAL_MS);
+    }
+
+    realtimeRunningRef.current = false;
+    setRealtimeRunning(false);
+
+    try {
+      const finalResult = await runWholeFileAggregatePredict(true);
+      setPredictResult(finalResult);
+
+      if (finalResult.window_results?.length > 0) {
+        setLiveResults([...finalResult.window_results].reverse());
+        setLivePage(1);
+      }
+
+      if (finalResult.status === "Fall Alert") {
+        setMessage(
+          `실시간 시뮬레이션 완료. 최종 낙상 위험도는 ${getDisplayFallPercent(
+            finalResult,
+          )}%이며, 가장 위험한 구간은 frame ${finalResult.frame_start} ~ ${
+            finalResult.frame_end
+          }입니다.`,
+        );
+      } else {
+        setMessage(
+          "실시간 시뮬레이션 완료. Fall Alert 구간이 감지되지 않았습니다.",
+        );
+      }
+
+      await refreshAll();
+    } catch (err) {
+      if (firstFall) {
+        setMessage(
+          `실시간 시뮬레이션 완료. 첫 낙상 의심 구간은 frame ${firstFall.frame_start} ~ ${firstFall.frame_end}입니다.`,
+        );
+      } else {
+        setMessage(`최종 집계 요청 실패: ${getErrorMessage(err)}`);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStopRealtime = () => {
+    realtimeRunningRef.current = false;
+    setRealtimeRunning(false);
+    setLoading(false);
+    setMessage("실시간 시뮬레이션을 중지했습니다.");
+  };
+
+  const handleDeleteEvents = async () => {
+    const ok = window.confirm("저장된 낙상 알림 로그를 모두 삭제할까요?");
+    if (!ok) return;
+
+    try {
+      await apiDelete("/events");
+      await refreshAll();
+      setPredictResult(null);
+      setSelectedEventId(null);
+      setMessage("이벤트 로그를 삭제했습니다.");
+    } catch (err) {
+      setMessage(`이벤트 삭제 실패: ${getErrorMessage(err)}`);
     }
   };
 
@@ -1363,30 +1667,28 @@ function FallDashboard() {
       db_message: "저장된 과거 낙상 알림 이벤트입니다.",
     };
 
+    realtimeRunningRef.current = false;
+
     setSelectedFile(null);
-    setFallScoreData([]);
+    setCsvText("");
+    setFrameChunks([]);
+    setLiveResults(
+      historyResult.window_results
+        ? [...historyResult.window_results].reverse()
+        : [],
+    );
+    setLivePage(1);
+    setCurrentChunkIndex(-1);
+    setRealtimeRunning(false);
     setPredictResult(historyResult);
     setSelectedEventId(eventId);
     setMessage("과거 낙상 알림 로그를 불러왔습니다.");
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const handleDeleteEvents = async () => {
-    const ok = window.confirm("저장된 낙상 알림 로그를 모두 삭제할까요?");
-    if (!ok) return;
-
-    try {
-      await apiDelete("/events");
-      await loadStats();
-      await loadEvents();
-      setPredictResult(null);
-      setFallScoreData([]);
-      setSelectedEventId(null);
-      setMessage("이벤트 로그를 삭제했습니다.");
-    } catch (err) {
-      setMessage("이벤트 삭제 중 오류가 발생했습니다.");
-    }
-  };
+  const apiConnected = Boolean(serverInfo);
+  const modelReady = Boolean(fallInfo?.model_exists);
+  const mongoConnected = Boolean(fallInfo?.mongo_connected);
 
   return (
     <div className="page">
@@ -1394,41 +1696,49 @@ function FallDashboard() {
         <div>
           <h1>독거노인 낙상 감지 관제 대시보드</h1>
           <p>
-            mmWave CSV 센서 데이터를 업로드하고 낙상 위험도를 예측하여 정상
-            행동과 낙상 알림 상태를 분석합니다.
+            전체 파일과 10프레임 실시간 분석 모두 같은 기준으로 낙상 위험도를
+            계산합니다.
           </p>
         </div>
+
+        <button className="refresh-btn" onClick={refreshAll}>
+          연결 다시 확인
+        </button>
       </header>
 
       <section className="fall-summary-grid">
         <div className="fall-summary-card api-card">
           <p>API 상태</p>
-          <strong>{serverInfo ? "정상 연결" : "확인 필요"}</strong>
+          <strong>{apiConnected ? "정상 연결" : "연결 안 됨"}</strong>
           <span>
-            {serverInfo?.model_exists
-              ? "낙상 감지 모델이 정상 로드되었습니다."
-              : "낙상 감지 모델 확인이 필요합니다."}
+            {apiConnected
+              ? "FastAPI 서버와 연결되었습니다."
+              : "백엔드 서버를 먼저 실행하세요."}
+          </span>
+        </div>
+
+        <div className="fall-summary-card">
+          <p>낙상 모델</p>
+          <strong>{modelReady ? "로드 가능" : "확인 필요"}</strong>
+          <span>
+            {modelReady
+              ? "models 폴더에서 pkl 파일을 찾았습니다."
+              : "models 폴더의 pkl 파일을 확인하세요."}
           </span>
         </div>
 
         <div className="fall-summary-card mongo-card">
           <p>MongoDB</p>
-          <strong>
-            {serverInfo?.mongo_connected ? "연결됨" : "연결 안 됨"}
-          </strong>
-          <span>낙상 알림 저장 DB 상태</span>
+          <strong>{mongoConnected ? "연결됨" : "저장 비활성"}</strong>
+          <span>MongoDB가 꺼져 있어도 예측은 가능합니다.</span>
         </div>
 
         <div className="fall-summary-card">
-          <p>필요 Feature</p>
-          <strong>{FALL_REQUIRED_FEATURE_COUNT}</strong>
-          <span>CSV 필수 컬럼 개수</span>
-        </div>
-
-        <div className="fall-summary-card">
-          <p>낙상 기록</p>
-          <strong>{stats?.total_events ?? 0}</strong>
-          <span>Fall Alert만 저장된 누적 기록</span>
+          <p>분석 단위</p>
+          <strong>{FRAME_WINDOW_SIZE}프레임</strong>
+          <span>
+            10FPS 기준 약 {((FRAME_WINDOW_SIZE / FPS) * 2).toFixed(1)}초
+          </span>
         </div>
 
         <div className="fall-summary-card danger-soft">
@@ -1442,14 +1752,27 @@ function FallDashboard() {
         <section className="card upload-card">
           <h2>CSV 낙상 예측 테스트</h2>
           <p className="desc">
-            mmWave CSV 파일을 업로드하면 낙상 여부를 예측합니다. Fall Alert인
-            경우에만 저장합니다.
+            CSV 파일을 업로드하면 frame 번호 기준으로 10프레임씩 나누어
+            실시간처럼 분석합니다.
           </p>
 
           <div className="upload-box">
             <input type="file" accept=".csv" onChange={handleFileChange} />
-            <button onClick={handlePredict} disabled={loading}>
-              {loading ? "분석 중..." : "예측 실행"}
+
+            <button onClick={handleRealtimePredict} disabled={loading}>
+              {realtimeRunning ? "실행 중..." : "10프레임 실시간 실행"}
+            </button>
+
+            <button onClick={handlePredictWholeFile} disabled={loading}>
+              전체 파일 예측
+            </button>
+
+            <button
+              type="button"
+              onClick={handleStopRealtime}
+              disabled={!realtimeRunning}
+            >
+              중지
             </button>
           </div>
 
@@ -1459,180 +1782,141 @@ function FallDashboard() {
 
           {message && <div className="message">{message}</div>}
 
-          {predictResult && (
-            <div className="result-box">
-              <div className="result-header">
-                <StatusBadge status={predictResult.status} />
-                <AlertText alert={predictResult.alert} />
-              </div>
+          <RealtimePanel
+            selectedFile={selectedFile}
+            frameChunks={frameChunks}
+            realtimeRunning={realtimeRunning}
+            currentChunkIndex={currentChunkIndex}
+            liveResults={liveResults}
+            livePage={livePage}
+            setLivePage={setLivePage}
+          />
 
-              <p className="result-message">
-                {getDisplayResultMessage(predictResult)}
-              </p>
+          <ResultCard result={predictResult} />
 
-              <div className="result-grid">
-                <div>
-                  <span>파일명</span>
-                  <strong title={predictResult.file_name}>
-                    {predictResult.file_name}
-                  </strong>
-                </div>
-                <div>
-                  <span>낙상 위험도</span>
-                  <strong>{getDisplayFallPercent(predictResult)}%</strong>
-                </div>
-                <div>
-                  <span>속도 최댓값</span>
-                  <strong>{formatSpeed(predictResult.speed_max)}</strong>
-                </div>
-                <div>
-                  <span>높이 변화</span>
-                  <strong>{formatMeter(predictResult.height_drop)}</strong>
-                </div>
-                <div>
-                  <span>낙상 이후 이동거리</span>
-                  <strong>
-                    {formatMovementCm(predictResult.movement_after)}
-                  </strong>
-                </div>
-                <div>
-                  <span>DB 저장</span>
-                  <strong>
-                    {predictResult.db_saved ? "저장됨" : "저장 안 함"}
-                  </strong>
-                </div>
-              </div>
-
-              {predictResult.db_message && (
-                <p className="db-message">
-                  {predictResult.status === "Fall Alert"
-                    ? predictResult.db_message
-                    : "정상 행동은 MongoDB에 저장하지 않습니다."}
-                </p>
-              )}
-            </div>
-          )}
-
-          {predictResult && (
+          {(predictResult || liveResults.length > 0) && (
             <div className="analysis-layout">
               <div className="analysis-left">
-                <ProbabilityChart result={predictResult} />
-                <FallScoreChart data={fallScoreData} result={predictResult} />
+                {predictResult && <ProbabilityChart result={predictResult} />}
+
+                <FallScoreChart
+                  result={predictResult}
+                  liveResults={liveResults}
+                />
               </div>
 
               <div className="analysis-right">
-                <DecisionEvidenceChart result={predictResult} />
+                {predictResult && <EvidenceChart result={predictResult} />}
               </div>
             </div>
           )}
         </section>
 
-        <section className="card events-card">
-          <div className="section-title-row">
-            <div>
-              <h2>최근 낙상 알림 로그</h2>
-              <p className="desc">
-                저장된 Fall Alert 이벤트만 표시합니다. 표의 행을 클릭하면 과거
-                결과값을 위쪽 결과 영역에서 다시 볼 수 있습니다.
-              </p>
-            </div>
-
-            <button className="delete-btn" onClick={handleDeleteEvents}>
-              로그 삭제
-            </button>
-          </div>
-
+        <aside className="side-panel">
           <RecentEventChart events={pagedEvents} />
 
-          <div className="table-wrap history-table-wrap">
-            <table className="history-log-table">
-              <thead>
-                <tr>
-                  <th>시간</th>
-                  <th>상태</th>
-                  <th>알림</th>
-                  <th>파일명</th>
-                  <th>위험도</th>
-                  <th>ID</th>
-                </tr>
-              </thead>
+          <section className="card events-card">
+            <div className="section-title-row">
+              <div>
+                <h2>최근 낙상 알림 로그</h2>
+                <p className="desc">
+                  최종 집계된 Fall Alert 이벤트만 표시합니다.
+                </p>
+              </div>
 
-              <tbody>
-                {pagedEvents.length === 0 ? (
+              <button className="delete-btn" onClick={handleDeleteEvents}>
+                로그 삭제
+              </button>
+            </div>
+
+            <div className="table-wrap history-table-wrap">
+              <table className="history-log-table">
+                <thead>
                   <tr>
-                    <td colSpan="6" className="empty">
-                      저장된 낙상 알림이 없습니다.
-                    </td>
+                    <th>시간</th>
+                    <th>상태</th>
+                    <th>알림</th>
+                    <th>파일명</th>
+                    <th>위험도</th>
                   </tr>
-                ) : (
-                  pagedEvents.map((event) => {
-                    const normalizedEvent = normalizeFallResult(
-                      event,
-                      event.file_name || event.filename || "-",
-                    );
-                    const eventPercent = getDisplayFallPercent(normalizedEvent);
-                    const eventId = getEventId(normalizedEvent);
-                    const isSelected = selectedEventId === eventId;
+                </thead>
 
-                    return (
-                      <tr
-                        key={eventId}
-                        className={`clickable-row ${
-                          isSelected ? "selected-row" : ""
-                        }`}
-                        onClick={() => handleSelectEvent(normalizedEvent)}
-                        title="클릭하면 과거 결과값을 불러옵니다."
-                      >
-                        <td className="time-cell">
-                          {formatDateTime(normalizedEvent.created_at)}
-                        </td>
-                        <td className="status-cell">
-                          <StatusBadge status={normalizedEvent.status} />
-                        </td>
-                        <td className="alert-cell">
-                          <AlertText alert={normalizedEvent.alert} />
-                        </td>
-                        <td
-                          className="file-cell"
-                          title={normalizedEvent.file_name}
+                <tbody>
+                  {pagedEvents.length === 0 ? (
+                    <tr>
+                      <td colSpan="5" className="empty">
+                        저장된 낙상 알림이 없습니다.
+                      </td>
+                    </tr>
+                  ) : (
+                    pagedEvents.map((event) => {
+                      const normalizedEvent = normalizeFallResult(event);
+                      const eventId = getEventId(normalizedEvent);
+                      const isSelected = selectedEventId === eventId;
+
+                      return (
+                        <tr
+                          key={eventId}
+                          className={`clickable-row ${
+                            isSelected ? "selected-row" : ""
+                          }`}
+                          onClick={() => handleSelectEvent(normalizedEvent)}
                         >
-                          {normalizedEvent.file_name}
-                        </td>
-                        <td className="prob-cell">{eventPercent}%</td>
-                        <td className="id-cell">{String(eventId).slice(-6)}</td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+                          <td className="time-cell">
+                            {formatDateTime(normalizedEvent.created_at)}
+                          </td>
 
-          <div className="pagination">
-            <button
-              type="button"
-              onClick={() => setEventPage((page) => Math.max(1, page - 1))}
-              disabled={safeEventPage <= 1}
-            >
-              &lt;
-            </button>
+                          <td className="status-cell">
+                            <StatusBadge status={normalizedEvent.status} />
+                          </td>
 
-            <span>
-              {safeEventPage} / {totalPages}
-            </span>
+                          <td className="alert-cell">
+                            <AlertText alert={normalizedEvent.alert} />
+                          </td>
 
-            <button
-              type="button"
-              onClick={() =>
-                setEventPage((page) => Math.min(totalPages, page + 1))
-              }
-              disabled={safeEventPage >= totalPages}
-            >
-              &gt;
-            </button>
-          </div>
-        </section>
+                          <td className="file-cell">
+                            {normalizedEvent.file_name}
+                          </td>
+
+                          <td className="prob-cell">
+                            {getDisplayFallPercent(normalizedEvent)}%
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="pagination">
+              <button
+                type="button"
+                onClick={() => setEventPage((page) => Math.max(1, page - 1))}
+                disabled={safeEventPage <= 1}
+              >
+                &lt;
+              </button>
+
+              <span>
+                {safeEventPage} / {totalPages}
+              </span>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setEventPage((page) => Math.min(totalPages, page + 1))
+                }
+                disabled={safeEventPage >= totalPages}
+              >
+                &gt;
+              </button>
+            </div>
+          </section>
+        </aside>
       </main>
+
+      {predictResult && <BehaviorAnalysisCard result={predictResult} />}
     </div>
   );
 }

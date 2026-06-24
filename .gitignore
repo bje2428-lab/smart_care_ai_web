@@ -26,3 +26,5 @@ frontend/.env
 .DS_Store
 Thumbs.db
 backend/abnormal_events_store.json
+data/vital_history/
+mmwave_model_vitalsignal/

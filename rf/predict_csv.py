@@ -16,11 +16,10 @@ except ModuleNotFoundError:
 MODEL_CANDIDATES = [
     Path("models/mmwave_rf_smote_model.pkl"),
     Path("models/mmwave_rf_model.pkl"),
-    Path("models/mmwave_rf_aug_model.pkl"),
-
+    
     Path("rf/models/mmwave_rf_smote_model.pkl"),
     Path("rf/models/mmwave_rf_model.pkl"),
-    Path("rf/models/mmwave_rf_aug_model.pkl"),
+    
 ]
 
 
@@ -151,7 +150,7 @@ def postprocess_fall_result(
     - height_drop만 보고 무조건 Fall 처리하지 않음
     - fall_prob만 보고 단독으로 Fall Alert 처리하지 않음
     - Towsif_back_5.csv처럼 애매한 Fall은
-      확률 + 높이 변화 + 속도 변화가 함께 있을 때만 보정
+    - 확률 + 높이 변화 + 속도 변화가 함께 있을 때만 보정
     """
 
     fall_prob = float(fall_prob)

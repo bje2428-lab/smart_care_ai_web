@@ -1,9 +1,10 @@
 /* =========================================================
-   Smart Care AI Fall Dashboard
-   - 상단 5개 요약 카드
-   - MongoDB 상태 분리 표시
-   - 프레임별 그래프 글자 짤림 방지
-   - 기존 낙상 대시보드 구조 유지
+   FallDashboard.css
+   레이아웃 목표
+   - 왼쪽: CSV 예측 / 실시간 표 / 결과 / 위험도 / 선형차트 / 판단 근거
+   - 오른쪽: 최근 낙상 알림 위험도 그래프 / 최근 낙상 알림 로그
+   - 아래: 행동 패턴 및 원인 분석 별도 카드
+   - 그래프 요약 카드 짤림 방지
 ========================================================= */
 
 * {
@@ -13,699 +14,325 @@
 body {
   margin: 0;
   background: #f4f7fb;
+}
+
+.page {
+  width: 100%;
+  max-width: 1580px;
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 24px 28px 56px;
+  background: #f4f7fb;
   color: #0f172a;
   overflow-x: hidden;
 }
 
-button,
-input {
-  font-family: inherit;
-}
-
-button {
-  cursor: pointer;
-}
-
 /* =========================================================
-   전체 페이지
-========================================================= */
-
-.page {
-  width: 100%;
-  max-width: 1264px !important;
-  margin: 0 auto !important;
-  padding: 24px 32px;
-  overflow-x: hidden;
-}
-
-/* =========================================================
-   상단 헤더
+   Header
 ========================================================= */
 
 .dashboard-header {
-  width: 100%;
-  min-height: 110px;
-  padding: 30px 38px;
-  margin-bottom: 22px;
-  border-radius: 24px;
-  background: linear-gradient(135deg, #1e40af 0%, #2563eb 45%, #38bdf8 100%);
-  color: white;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
-  box-shadow: 0 18px 45px rgba(37, 99, 235, 0.22);
+  gap: 22px;
+  padding: 26px 30px;
+  border-radius: 28px;
+  background: linear-gradient(135deg, #1d4ed8, #38bdf8);
+  color: #fff;
+  box-shadow: 0 18px 42px rgba(37, 99, 235, 0.18);
+  margin-bottom: 22px;
 }
 
 .dashboard-header h1 {
   margin: 0;
-  font-size: 34px;
-  font-weight: 900;
-  letter-spacing: -0.04em;
-  line-height: 1.2;
+  font-size: 29px;
+  font-weight: 950;
+  letter-spacing: -0.045em;
 }
 
 .dashboard-header p {
-  margin: 8px 0 0;
+  margin: 9px 0 0;
   font-size: 15px;
-  color: rgba(255, 255, 255, 0.88);
-  font-weight: 600;
+  line-height: 1.6;
+  opacity: 0.92;
+}
+
+.refresh-btn {
+  border: 0;
+  padding: 12px 18px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  font-weight: 900;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.refresh-btn:hover {
+  background: rgba(255, 255, 255, 0.28);
 }
 
 /* =========================================================
-   상단 요약 카드
+   Summary cards
 ========================================================= */
 
 .fall-summary-grid {
   display: grid;
-  grid-template-columns:
-    minmax(0, 1.3fr)
-    minmax(0, 0.9fr)
-    minmax(0, 0.75fr)
-    minmax(0, 0.8fr)
-    minmax(0, 0.85fr);
-  gap: 20px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 18px;
   margin-bottom: 22px;
-  align-items: stretch;
 }
 
 .fall-summary-card {
   min-width: 0;
-  min-height: 146px;
-  padding: 24px 22px;
+  min-height: 142px;
+  padding: 21px 20px;
   border-radius: 22px;
-  background: #ffffff;
+  background: #fff;
   border: 1px solid #e5eaf3;
-  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.06);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.045);
 }
 
 .fall-summary-card p {
-  display: block;
-  margin: 0 0 10px;
-  font-size: 13px;
+  margin: 0 0 9px;
   color: #64748b;
-  font-weight: 800;
-  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 950;
 }
 
 .fall-summary-card strong {
   display: block;
   margin-bottom: 10px;
-  font-size: 30px;
-  font-weight: 900;
-  letter-spacing: -0.04em;
-  color: #0f172a;
-  line-height: 1.15;
+  font-size: 26px;
+  line-height: 1.1;
+  font-weight: 950;
+  letter-spacing: -0.05em;
   word-break: keep-all;
-  white-space: nowrap;
 }
 
 .fall-summary-card span {
-  display: block;
-  color: #64748b;
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.5;
-  word-break: keep-all;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.55;
+  font-weight: 750;
 }
 
-.fall-summary-card.api-card strong {
-  font-size: 32px;
-}
-
-.fall-summary-card.mongo-card strong {
-  color: #0f172a;
-}
-
-.fall-summary-card.danger-soft {
+.danger-soft {
   background: #fff1f2;
   border-color: #fecdd3;
 }
 
-.fall-summary-card.danger-soft p,
-.fall-summary-card.danger-soft strong {
+.danger-soft strong {
   color: #e11d48;
 }
 
 /* =========================================================
-   메인 레이아웃
+   Main layout
 ========================================================= */
 
 .main-grid {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 22px;
+  grid-template-columns: minmax(0, 1.38fr) minmax(410px, 0.62fr);
+  gap: 24px;
   align-items: start;
 }
 
-.card {
+.side-panel {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 18px;
+  align-content: start;
   min-width: 0;
-  width: 100%;
-  background: white;
+}
+
+.card,
+.chart-card {
+  min-width: 0;
+  background: #fff;
   border: 1px solid #e5eaf3;
-  border-radius: 24px;
-  padding: 24px;
-  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.06);
-  overflow: visible;
+  border-radius: 26px;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.045);
+}
+
+.card {
+  padding: 22px;
+}
+
+.chart-card {
+  padding: 19px;
+  overflow: hidden;
+}
+
+.card h2,
+.chart-card h3 {
+  margin: 0 0 8px;
+  color: #0f172a;
+  font-weight: 950;
+  letter-spacing: -0.04em;
 }
 
 .card h2 {
-  margin: 0 0 10px;
-  font-size: 22px;
-  font-weight: 900;
-  letter-spacing: -0.03em;
+  font-size: 21px;
+}
+
+.chart-card h3 {
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.desc,
+.chart-card p {
+  margin: 0;
+  color: #64748b;
+  font-size: 14px;
+  line-height: 1.65;
+  font-weight: 650;
 }
 
 .desc {
-  margin: 0 0 18px;
-  color: #475569;
-  font-size: 14px;
-  line-height: 1.6;
+  margin-bottom: 16px;
 }
 
-.section-title-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 14px;
+.upload-card,
+.events-card,
+.behavior-full-card {
+  width: 100%;
+}
+
+.events-card {
+  padding: 19px;
+}
+
+.behavior-full-card {
+  margin-top: 24px;
 }
 
 /* =========================================================
-   업로드 영역
+   Upload
 ========================================================= */
 
 .upload-box {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  width: 100%;
-  padding: 18px;
-  border: 2px dashed #cbd5e1;
-  border-radius: 20px;
+  display: grid;
+  grid-template-columns: minmax(230px, 1fr) auto auto auto;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 18px;
   background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  margin-bottom: 12px;
 }
 
 .upload-box input {
   min-width: 0;
-  flex: 1;
-  font-size: 14px;
+  width: 100%;
+  padding: 10px;
+  background: #fff;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  color: #0f172a;
+  font-weight: 700;
 }
 
-.upload-box button {
+.upload-box button,
+.delete-btn {
   border: 0;
-  padding: 13px 18px;
-  border-radius: 15px;
+  border-radius: 12px;
+  padding: 11px 14px;
   background: #2563eb;
-  color: white;
+  color: #fff;
   font-weight: 900;
+  cursor: pointer;
   white-space: nowrap;
 }
 
-.upload-box button:hover {
+.upload-box button:hover,
+.delete-btn:hover {
   background: #1d4ed8;
 }
 
 .upload-box button:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
+.upload-box button:nth-of-type(2) {
+  background: #0f172a;
+}
+
+.upload-box button:nth-of-type(2):hover {
+  background: #1e293b;
+}
+
+.upload-box button:nth-of-type(3) {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.upload-box button:nth-of-type(3):hover:not(:disabled) {
+  background: #fecaca;
+}
+
 .selected-file {
-  margin: 14px 0 0;
+  margin: 0 0 12px;
   color: #334155;
   font-size: 14px;
-  font-weight: 600;
-  overflow-wrap: anywhere;
+  font-weight: 850;
 }
 
 .message {
-  margin-top: 16px;
-  padding: 14px 16px;
-  border-radius: 16px;
+  margin: 14px 0;
+  padding: 13px 15px;
+  border-radius: 15px;
   background: #eff6ff;
-  border: 1px solid #bfdbfe;
   color: #1d4ed8;
-  font-weight: 800;
-  font-size: 14px;
+  font-weight: 850;
+  line-height: 1.55;
 }
 
 /* =========================================================
-   결과 박스
+   Common rows / chips
 ========================================================= */
 
-.result-box {
-  margin-top: 18px;
-  padding: 20px;
-  border-radius: 22px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-}
-
+.realtime-title-row,
+.chart-title-row,
+.section-title-row,
 .result-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-.result-message {
-  margin: 0 0 16px;
-  color: #334155;
-  line-height: 1.7;
-  font-size: 14px;
-}
-
-.result-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.result-grid > div {
-  min-width: 0;
-  padding: 15px;
-  border-radius: 16px;
-  background: white;
-  border: 1px solid #eef2f7;
-}
-
-.result-grid span {
-  display: block;
-  margin-bottom: 7px;
-  color: #64748b;
-  font-size: 13px;
-  font-weight: 800;
-}
-
-.result-grid strong {
-  display: block;
-  max-width: 100%;
-  font-size: 15px;
-  color: #0f172a;
-  font-weight: 900;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-}
-
-.db-message {
-  margin: 16px 0 0;
-  color: #334155;
-  font-size: 14px;
-}
-
-/* =========================================================
-   Badge / Alert
-========================================================= */
-
-.badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 76px;
-  padding: 8px 11px;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 900;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.badge.danger {
-  color: #dc2626;
-  background: #fee2e2;
-}
-
-.badge.normal {
-  color: #15803d;
-  background: #dcfce7;
-}
-
-.alert-true {
-  color: #dc2626;
-  font-weight: 900;
-  white-space: nowrap;
-}
-
-.alert-false {
-  color: #15803d;
-  font-weight: 900;
-  white-space: nowrap;
-}
-
-/* =========================================================
-   분석 그래프
-   글자 짤림 방지를 위해 전체 폭 1열 구성
-========================================================= */
-
-.analysis-layout {
-  width: 100%;
-  margin-top: 18px;
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 18px;
-  align-items: start;
-}
-
-.analysis-left,
-.analysis-right {
-  min-width: 0;
-  width: 100%;
-}
-
-.analysis-left {
-  display: grid;
-  gap: 18px;
-}
-
-.analysis-layout .chart-card,
-.analysis-left .chart-card + .chart-card {
-  margin-top: 0;
-}
-
-.analysis-right .chart-card {
-  height: auto;
-}
-
-/* =========================================================
-   공통 그래프 카드
-========================================================= */
-
-.chart-card {
-  min-width: 0;
-  width: 100%;
-  margin-top: 18px;
-  padding: 20px;
-  border-radius: 22px;
-  background: white;
-  border: 1px solid #e5eaf3;
-  overflow: visible;
-}
-
-.chart-title-row {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 14px;
 }
 
-.chart-title-row > div {
-  min-width: 0;
-  flex: 1;
-}
-
-.chart-card h3,
-.chart-title-row h3 {
-  margin: 0 0 8px;
-  font-size: 18px;
-  font-weight: 900;
-  letter-spacing: -0.03em;
-  word-break: keep-all;
-  line-height: 1.35;
-}
-
-.chart-card p,
-.chart-title-row p {
-  margin: 0;
-  color: #64748b;
-  font-size: 14px;
-  line-height: 1.5;
-  word-break: keep-all;
-  overflow-wrap: break-word;
-}
-
-/* =========================================================
-   낙상 위험도 바
-========================================================= */
-
-.probability-graph {
-  margin-top: 22px;
-}
-
-.probability-track {
-  width: 100%;
-  height: 18px;
-  border-radius: 999px;
-  background: #e5e7eb;
-  overflow: hidden;
-}
-
-.probability-fill {
-  height: 100%;
-  border-radius: 999px;
-  transition: width 0.35s ease;
-}
-
-.danger-fill {
-  background: linear-gradient(90deg, #ef4444, #dc2626);
-}
-
-.warning-fill {
-  background: linear-gradient(90deg, #facc15, #f59e0b);
-}
-
-.normal-fill {
-  background: linear-gradient(90deg, #22c55e, #16a34a);
-}
-
-.probability-info {
-  margin-top: 12px;
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-}
-
-.probability-info strong {
-  font-size: 34px;
-  font-weight: 900;
-  letter-spacing: -0.04em;
-}
-
-.probability-info span {
-  font-weight: 900;
-  color: #334155;
-}
-
-.scale-row {
-  margin-top: 12px;
-  display: flex;
-  justify-content: space-between;
-  color: #94a3b8;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-/* =========================================================
-   판단 근거 그래프
-========================================================= */
-
-.bar-chart {
-  width: 100%;
-  margin-top: 18px;
-  display: grid;
-  gap: 20px;
-  overflow: visible;
-}
-
-.evidence-list {
-  gap: 18px;
-}
-
-.evidence-item {
-  display: grid;
-  gap: 8px;
-}
-
-.evidence-item-top {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
-  gap: 12px;
-  align-items: end;
-}
-
-.bar-label {
-  min-width: 0;
-}
-
-.bar-label strong {
-  display: block;
-  font-size: 17px;
-  font-weight: 900;
-  color: #020617;
-  line-height: 1.2;
-  word-break: keep-all;
-}
-
-.bar-label span {
-  display: block;
-  margin-top: 6px;
-  font-size: 12px;
-  font-weight: 700;
-  color: #64748b;
-  line-height: 1.45;
-  word-break: keep-all;
-  white-space: normal;
-}
-
-.bar-track {
-  width: 100%;
-  min-width: 0;
-  height: 16px;
-  border-radius: 999px;
-  background: #e5e7eb;
-  overflow: hidden;
-}
-
-.bar-fill {
-  height: 100%;
-  border-radius: 999px;
-}
-
-.bar-value {
-  width: auto;
-  min-width: 86px;
-  text-align: right;
-  font-size: 14px;
-  font-weight: 900;
-  color: #334155;
-  white-space: nowrap;
-  overflow: visible;
-}
-
-.evidence-danger {
-  background: linear-gradient(90deg, #ef4444, #f97316);
-}
-
-.evidence-warning {
-  background: linear-gradient(90deg, #f59e0b, #facc15);
-}
-
-.evidence-normal {
-  background: linear-gradient(90deg, #22c55e, #38bdf8);
-}
-
-.evidence-summary {
-  margin-top: 18px;
-  padding: 16px 18px;
-  border-radius: 16px;
-  background: #f8fafc;
-  color: #334155;
-  border: 1px solid #e5eaf3;
-}
-
-.evidence-summary h4 {
-  margin: 0 0 10px;
-  font-size: 16px;
-  font-weight: 900;
-  color: #0f172a;
-}
-
-.decision-status {
-  margin: 0 0 10px;
-  font-size: 14px;
-  color: #334155;
-}
-
-.decision-status strong {
-  color: #2563eb;
-}
-
-.evidence-summary ul {
-  margin: 0;
-  padding-left: 18px;
-}
-
-.evidence-summary li {
-  margin-bottom: 6px;
-  font-size: 14px;
-  line-height: 1.5;
-}
-
-/* =========================================================
-   프레임별 낙상 판정 그래프
-========================================================= */
-
-.line-chart-wrap {
-  width: 100%;
-  margin-top: 18px;
-  overflow-x: auto;
-  padding: 10px;
-  background: #f8fafc;
-  border-radius: 18px;
-}
-
-.fall-score-svg {
-  width: 100%;
-  min-width: 760px;
-  height: auto;
-  display: block;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-  border-radius: 16px;
-}
-
-.axis-line {
-  stroke: #94a3b8;
-  stroke-width: 1.4;
-}
-
-.grid-line {
-  stroke: #e5e7eb;
-  stroke-width: 1;
-}
-
-.axis-text {
-  fill: #64748b;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.fall-score-line {
-  fill: none;
-  stroke: #ef4444;
-  stroke-width: 4;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.fall-threshold-line {
-  stroke: #f97316;
-  stroke-width: 2;
-  stroke-dasharray: 7 6;
-}
-
-.fall-threshold-text {
-  fill: #ea580c;
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.fall-zone-area {
-  fill: rgba(239, 68, 68, 0.14);
-}
-
-.fall-zone-center-line {
-  stroke: #dc2626;
-  stroke-width: 2;
-  stroke-dasharray: 6 5;
-}
-
-.fall-zone-text {
-  fill: #dc2626;
-  font-size: 13px;
-  font-weight: 900;
-}
-
+.live-chip,
 .fall-zone-chip,
-.normal-zone-chip {
+.normal-zone-chip,
+.behavior-chip,
+.badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 8px 11px;
   border-radius: 999px;
-  font-size: 12px;
-  font-weight: 900;
   white-space: nowrap;
-  flex-shrink: 0;
+  font-weight: 950;
+}
+
+.live-chip,
+.fall-zone-chip,
+.normal-zone-chip,
+.behavior-chip {
+  padding: 8px 11px;
+  font-size: 12px;
+}
+
+.live-chip {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.live-chip.on {
+  background: #fee2e2;
+  color: #dc2626;
 }
 
 .fall-zone-chip {
@@ -718,318 +345,223 @@ button {
   color: #15803d;
 }
 
-.fall-score-legend {
+.behavior-chip {
+  background: #eef2ff;
+  color: #3730a3;
+}
+
+.badge {
+  padding: 7px 11px;
+  background: #e2e8f0;
+  color: #334155;
+  font-size: 12px;
+}
+
+.badge.normal {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.badge.danger {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.alert-true {
+  color: #dc2626;
+  font-weight: 950;
+}
+
+.alert-false {
+  color: #64748b;
+  font-weight: 950;
+}
+
+/* =========================================================
+   Realtime panel
+========================================================= */
+
+.realtime-panel {
+  margin-top: 16px;
+  padding: 18px;
+  border-radius: 22px;
+  background: #fff;
+  border: 1px solid #e5eaf3;
+}
+
+.realtime-title-row h3 {
+  margin: 0 0 8px;
+  font-size: 18px;
+  line-height: 1.35;
+  font-weight: 950;
+  letter-spacing: -0.035em;
+}
+
+.realtime-title-row p {
+  margin: 0;
+  color: #64748b;
+  font-size: 14px;
+  line-height: 1.65;
+  font-weight: 650;
+}
+
+.realtime-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(110px, 0.6fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.realtime-grid > div,
+.result-grid > div,
+.fall-metric-grid > div,
+.behavior-grid > div {
+  min-width: 0;
+  padding: 14px;
+  border-radius: 16px;
+  background: #f8fafc;
+  border: 1px solid #eef2f7;
+}
+
+.realtime-grid span,
+.result-grid span,
+.fall-metric-grid span,
+.behavior-grid span {
+  display: block;
+  margin-bottom: 7px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.35;
+  font-weight: 900;
+  word-break: keep-all;
+}
+
+.realtime-grid strong,
+.result-grid strong,
+.fall-metric-grid strong,
+.behavior-grid strong {
+  display: block;
+  color: #0f172a;
+  font-weight: 950;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+.realtime-grid strong,
+.result-grid strong,
+.behavior-grid strong {
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.compact-live-summary {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 14px;
 }
 
-.fall-score-legend span {
+.compact-live-summary span {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 7px 10px;
+  gap: 5px;
+  padding: 8px 11px;
   border-radius: 999px;
-  background: #f8fafc;
-  border: 1px solid #e5eaf3;
-  color: #334155;
-  font-size: 12px;
-  font-weight: 900;
-  white-space: nowrap;
-}
-
-.fall-score-legend span::before {
-  content: "";
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  display: inline-block;
-}
-
-.legend-score::before {
-  background: #ef4444;
-}
-
-.legend-threshold::before {
-  background: #f97316;
-}
-
-.legend-fall::before {
-  background: #dc2626;
-}
-
-/* =========================================================
-   프레임 그래프 하단 요약 카드
-========================================================= */
-
-.fall-metric-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 16px;
-}
-
-.fall-metric-grid > div {
-  min-width: 0;
-  padding: 16px 14px;
-  border-radius: 16px;
-  background: #f8fafc;
-  border: 1px solid #e5eaf3;
-}
-
-.fall-metric-grid span {
-  display: block;
-  margin-bottom: 8px;
+  background: #eff6ff;
+  color: #1d4ed8;
   font-size: 13px;
-  color: #64748b;
   font-weight: 900;
-  line-height: 1.35;
-  word-break: keep-all;
-  white-space: normal;
 }
 
-.fall-metric-grid strong {
-  display: block;
-  font-size: 24px;
+.compact-live-summary strong {
   color: #0f172a;
-  font-weight: 900;
-  line-height: 1.15;
-  letter-spacing: -0.04em;
-  word-break: keep-all;
-  white-space: normal;
-  overflow: visible;
-  text-overflow: clip;
-}
-
-.fall-metric-grid p {
-  margin-top: 8px !important;
-  font-size: 12px !important;
-  color: #64748b !important;
-  font-weight: 800;
-  line-height: 1.45 !important;
-  word-break: keep-all;
-  white-space: normal;
-}
-
-.fall-zone-note,
-.normal-zone-note {
-  width: 100%;
-  margin-top: 12px !important;
-  padding: 12px 14px;
-  border-radius: 14px;
-  font-size: 13px !important;
-  font-weight: 800;
-  line-height: 1.7 !important;
-  word-break: keep-all;
-  overflow-wrap: break-word;
-}
-
-.fall-zone-note {
-  background: #fff1f2;
-  color: #991b1b !important;
-  border: 1px solid #fecdd3;
-}
-
-.normal-zone-note {
-  background: #f0fdf4;
-  color: #166534 !important;
-  border: 1px solid #bbf7d0;
 }
 
 /* =========================================================
-   최근 로그 미니 차트
-========================================================= */
-
-.mini-column-chart {
-  width: 100%;
-  height: 122px;
-  margin-top: 14px;
-  display: flex;
-  align-items: end;
-  gap: 8px;
-  overflow: hidden;
-}
-
-.mini-column-item {
-  flex: 1;
-  min-width: 30px;
-  text-align: center;
-}
-
-.mini-column-wrap {
-  height: 82px;
-  display: flex;
-  align-items: end;
-  justify-content: center;
-  border-radius: 11px;
-  background: #f1f5f9;
-  overflow: hidden;
-}
-
-.mini-column {
-  width: 100%;
-  max-width: 32px;
-  border-radius: 11px 11px 0 0;
-  background: linear-gradient(180deg, #fb7185, #ef4444);
-}
-
-.mini-column-item span {
-  display: block;
-  margin-top: 6px;
-  font-size: 12px;
-  font-weight: 900;
-  color: #334155;
-}
-
-.empty-chart {
-  margin-top: 14px !important;
-  padding: 18px;
-  border-radius: 16px;
-  background: #f8fafc;
-  color: #64748b !important;
-}
-
-/* =========================================================
-   버튼
-========================================================= */
-
-.delete-btn {
-  border: 0;
-  padding: 10px 14px;
-  border-radius: 13px;
-  font-weight: 900;
-  white-space: nowrap;
-  background: #fee2e2;
-  color: #dc2626;
-}
-
-.delete-btn:hover {
-  background: #fecaca;
-}
-
-/* =========================================================
-   테이블
+   Tables / pagination
 ========================================================= */
 
 .table-wrap {
   width: 100%;
-  margin-top: 18px;
   overflow-x: auto;
-  border-radius: 18px;
-  border: 1px solid #e5eaf3;
 }
 
-table {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
+.realtime-table-wrap,
+.history-table-wrap {
+  margin-top: 14px;
 }
 
 .history-log-table {
   width: 100%;
-  min-width: 760px;
+  border-collapse: collapse;
+  min-width: 680px;
 }
 
-th,
-td {
-  padding: 14px 12px;
-  vertical-align: middle;
-  border-bottom: 1px solid #eef2f7;
-  font-size: 14px;
-}
-
-th {
-  background: #f8fafc;
-  color: #64748b;
-  font-size: 13px;
-  font-weight: 900;
+.history-log-table th,
+.history-log-table td {
+  padding: 11px 10px;
+  border-bottom: 1px solid #e5eaf3;
   text-align: left;
-  white-space: nowrap;
+  font-size: 13px;
+  vertical-align: middle;
 }
 
-.empty {
-  text-align: center;
+.history-log-table th {
   color: #64748b;
-  padding: 28px !important;
+  font-weight: 950;
+  background: #f8fafc;
 }
 
-.history-log-table th:nth-child(1),
-.history-log-table td:nth-child(1) {
-  width: 132px;
-}
-
-.history-log-table th:nth-child(2),
-.history-log-table td:nth-child(2) {
-  width: 104px;
-}
-
-.history-log-table th:nth-child(3),
-.history-log-table td:nth-child(3) {
-  width: 96px;
-}
-
-.history-log-table th:nth-child(4),
-.history-log-table td:nth-child(4) {
-  width: auto;
-}
-
-.history-log-table th:nth-child(5),
-.history-log-table td:nth-child(5) {
-  width: 86px;
-  text-align: center;
-}
-
-.history-log-table th:nth-child(6),
-.history-log-table td:nth-child(6) {
-  width: 86px;
-  text-align: center;
-}
-
-.time-cell {
-  white-space: normal;
-  line-height: 1.25;
-  word-break: keep-all;
-  color: #0f172a;
-  font-weight: 700;
-}
-
-.status-cell {
-  white-space: nowrap;
-}
-
-.alert-cell {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.file-cell {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #0f172a;
-  font-weight: 800;
-}
-
-.prob-cell,
-.id-cell {
-  white-space: nowrap;
-  font-weight: 900;
+.history-log-table td {
   color: #334155;
+  font-weight: 750;
 }
 
-.history-log-table .badge {
-  min-width: 66px;
-  padding: 7px 8px;
-  font-size: 12px;
+.history-log-table .empty {
+  text-align: center;
+  padding: 28px;
+  color: #94a3b8;
+}
+
+.live-pagination,
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.live-pagination button,
+.pagination button {
+  border: 0;
+  border-radius: 10px;
+  padding: 9px 13px;
+  background: #e2e8f0;
+  color: #0f172a;
+  font-weight: 950;
+  cursor: pointer;
+}
+
+.live-pagination button:hover:not(:disabled),
+.pagination button:hover:not(:disabled) {
+  background: #cbd5e1;
+}
+
+.live-pagination button:disabled,
+.pagination button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.live-pagination span,
+.pagination span {
+  color: #334155;
+  font-weight: 950;
 }
 
 .clickable-row {
   cursor: pointer;
-  transition:
-    background 0.15s ease,
-    transform 0.12s ease;
 }
 
 .clickable-row:hover {
@@ -1037,51 +569,508 @@ th {
 }
 
 .selected-row {
-  background: #eff6ff !important;
+  background: #eff6ff;
 }
 
-.selected-row td:first-child {
-  box-shadow: inset 4px 0 0 #2563eb;
+.file-cell {
+  max-width: 185px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* =========================================================
-   페이징
+   Result card
 ========================================================= */
 
-.pagination {
+.result-box {
+  margin-top: 18px;
+  padding: 19px;
+  border-radius: 21px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.result-message {
+  margin: 13px 0 0;
+  color: #334155;
+  font-size: 15px;
+  line-height: 1.6;
+  font-weight: 750;
+}
+
+.result-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 15px;
+}
+
+.db-message {
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #fff;
+  color: #475569;
+  font-size: 14px;
+  font-weight: 850;
+}
+
+/* =========================================================
+   Analysis layout inside left card
+========================================================= */
+
+.analysis-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.44fr);
+  gap: 18px;
+  align-items: start;
+  margin-top: 18px;
+}
+
+.analysis-left,
+.analysis-right {
+  min-width: 0;
+  display: grid;
+  gap: 18px;
+}
+
+/* =========================================================
+   Probability chart
+========================================================= */
+
+.probability-graph {
+  margin-top: 17px;
+}
+
+.probability-track {
+  height: 18px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.probability-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.35s ease;
+}
+
+.normal-fill {
+  background: #22c55e;
+}
+
+.warning-fill {
+  background: #f59e0b;
+}
+
+.danger-fill {
+  background: #ef4444;
+}
+
+.probability-info {
   display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 14px;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 13px;
+}
+
+.probability-info strong {
+  font-size: 29px;
+  line-height: 1.1;
+  font-weight: 950;
+  letter-spacing: -0.045em;
+}
+
+.probability-info span {
+  color: #64748b;
+  font-weight: 850;
+}
+
+.scale-row {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+/* =========================================================
+   Fall line chart - no clipping
+========================================================= */
+
+.line-chart-wrap {
+  width: 100%;
+  overflow: hidden;
+  padding: 12px 6px 0;
+  margin-top: 14px;
+  border-radius: 20px;
+  background: linear-gradient(180deg, #fbfdff 0%, #fff 100%);
+}
+
+.fall-score-svg {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: auto;
+  aspect-ratio: 760 / 280;
+  overflow: visible;
+}
+
+.axis-line {
+  stroke: #94a3b8;
+  stroke-width: 1.6;
+}
+
+.axis-text {
+  fill: #64748b;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.fall-threshold-line {
+  stroke: #f97316;
+  stroke-width: 2;
+  stroke-dasharray: 8 8;
+}
+
+.fall-threshold-text {
+  fill: #ea580c;
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.fall-score-line {
+  fill: none;
+  stroke: #ef4444;
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 4px 8px rgba(239, 68, 68, 0.14));
+}
+
+.fall-zone-area {
+  fill: rgba(239, 68, 68, 0.11);
+}
+
+.fall-zone-center-line {
+  stroke: #ef4444;
+  stroke-width: 2;
+  stroke-dasharray: 6 6;
+}
+
+.fall-zone-text {
+  fill: #dc2626;
+  font-size: 13px;
+  font-weight: 950;
+}
+
+/* 핵심: 카드가 짤리지 않도록 4열 고정 대신 자동 줄바꿈 */
+.fall-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+  gap: 12px;
   margin-top: 16px;
 }
 
-.pagination button {
-  border: 0;
-  border-radius: 12px;
-  padding: 9px 15px;
-  background: #eef4ff;
-  color: #2563eb;
-  font-weight: 900;
+.fall-metric-grid > div {
+  min-height: 126px;
 }
 
-.pagination button:hover:not(:disabled) {
-  background: #dbeafe;
+.fall-metric-grid strong {
+  font-size: 25px;
+  line-height: 1.14;
+  letter-spacing: -0.045em;
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: normal;
 }
 
-.pagination button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
+.fall-metric-grid p {
+  margin: 7px 0 0;
+  color: #64748b;
+  font-size: 12.5px;
+  line-height: 1.45;
+  font-weight: 750;
+  word-break: keep-all;
 }
 
-.pagination span {
+.fall-zone-note,
+.normal-zone-note {
+  margin: 14px 0 0;
+  padding: 13px 15px;
+  border-radius: 15px;
   font-size: 14px;
-  color: #334155;
+  line-height: 1.55;
   font-weight: 900;
+}
+
+.fall-zone-note {
+  background: #fff1f2;
+  border: 1px solid #fecdd3;
+  color: #be123c;
+}
+
+.normal-zone-note {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #15803d;
 }
 
 /* =========================================================
-   반응형
+   Evidence chart
+========================================================= */
+
+.evidence-list {
+  margin-top: 15px;
+  display: grid;
+  gap: 13px;
+}
+
+.evidence-item-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.bar-label {
+  min-width: 0;
+}
+
+.bar-label strong {
+  display: block;
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.35;
+  font-weight: 950;
+}
+
+.bar-label span {
+  display: block;
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+  font-weight: 750;
+  word-break: keep-all;
+}
+
+.bar-value {
+  flex-shrink: 0;
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.35;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+.bar-track {
+  height: 12px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  border-radius: 999px;
+}
+
+.evidence-normal {
+  background: #22c55e;
+}
+
+.evidence-warning {
+  background: #f59e0b;
+}
+
+.evidence-danger {
+  background: #ef4444;
+}
+
+.evidence-summary {
+  margin-top: 16px;
+  padding: 15px;
+  border-radius: 16px;
+  background: #f8fafc;
+  border: 1px solid #e5eaf3;
+}
+
+.evidence-summary h4 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.evidence-summary ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.evidence-summary li {
+  margin-bottom: 6px;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.55;
+  font-weight: 750;
+}
+
+/* =========================================================
+   Right side: recent chart / log
+========================================================= */
+
+.history-chart-card {
+  margin: 0;
+}
+
+.mini-column-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  height: 135px;
+  margin-top: 16px;
+  padding: 10px 4px 0;
+}
+
+.mini-column-item {
+  flex: 1;
+  min-width: 34px;
+  text-align: center;
+}
+
+.mini-column-wrap {
+  height: 92px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  border-radius: 12px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+
+.mini-column {
+  width: 62%;
+  min-height: 5px;
+  border-radius: 999px 999px 0 0;
+  background: linear-gradient(180deg, #ef4444, #fb7185);
+}
+
+.mini-column-item span {
+  display: block;
+  margin-top: 7px;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.side-panel .events-card .history-log-table {
+  min-width: 560px;
+}
+
+.side-panel .events-card .file-cell {
+  max-width: 175px;
+}
+
+/* =========================================================
+   Bottom behavior card - separate full width
+========================================================= */
+
+.behavior-full-card {
+  padding: 22px;
+}
+
+.behavior-card-inner {
+  margin: 0;
+  box-shadow: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.behavior-summary {
+  margin-top: 15px;
+  padding: 18px 20px;
+  border-radius: 18px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.behavior-summary strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #0f172a;
+  font-size: 16.5px;
+  line-height: 1.6;
+  font-weight: 950;
+  letter-spacing: -0.02em;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+.behavior-summary p {
+  margin: 0;
+  color: #475569;
+  font-size: 14px;
+  line-height: 1.7;
+  font-weight: 750;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+.behavior-grid {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.6fr) minmax(160px, 0.6fr) minmax(
+      260px,
+      1.8fr
+    );
+  gap: 12px;
+  margin-top: 13px;
+}
+
+.behavior-list-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 13px;
+}
+
+.behavior-list-grid > div {
+  min-width: 0;
+  padding: 17px 18px;
+  border-radius: 17px;
+  background: #f8fafc;
+  border: 1px solid #e5eaf3;
+}
+
+.behavior-list-grid h4 {
+  margin: 0 0 10px;
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 950;
+}
+
+.behavior-list-grid ul {
+  margin: 0;
+  padding-left: 19px;
+}
+
+.behavior-list-grid li {
+  margin-bottom: 8px;
+  color: #334155;
+  font-size: 13.5px;
+  line-height: 1.62;
+  font-weight: 750;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+/* =========================================================
+   Responsive
 ========================================================= */
 
 @media (max-width: 1280px) {
@@ -1089,85 +1078,68 @@ th {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .fall-metric-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .main-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .side-panel {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .analysis-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .behavior-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .behavior-list-grid {
+    grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 860px) {
   .page {
-    padding: 18px;
+    padding: 18px 16px 44px;
   }
 
   .dashboard-header {
     flex-direction: column;
     align-items: flex-start;
-    padding: 24px;
+    padding: 24px 22px;
+    border-radius: 24px;
   }
 
-  .dashboard-header h1 {
-    font-size: 28px;
-  }
-
-  .fall-summary-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .result-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .upload-box {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .section-title-row {
-    flex-direction: column;
-  }
-
-  .delete-btn {
+  .refresh-btn {
     width: 100%;
   }
 
-  .fall-metric-grid {
+  .fall-summary-grid,
+  .side-panel,
+  .upload-box,
+  .realtime-grid,
+  .result-grid,
+  .fall-metric-grid,
+  .behavior-grid,
+  .behavior-list-grid {
     grid-template-columns: 1fr;
+  }
+
+  .upload-box input,
+  .upload-box button {
+    width: 100%;
+  }
+
+  .realtime-title-row,
+  .chart-title-row,
+  .section-title-row,
+  .result-header {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .fall-score-svg {
-    min-width: 680px;
-  }
-
-  .evidence-item-top {
-    grid-template-columns: 1fr;
-  }
-
-  .bar-value {
-    width: 100%;
-    min-width: 0;
-    text-align: left;
-  }
-}
-
-@media (max-width: 560px) {
-  .page {
-    padding: 14px;
-  }
-
-  .card {
-    padding: 18px;
-    border-radius: 18px;
-  }
-
-  .dashboard-header {
-    border-radius: 18px;
-  }
-
-  .probability-info strong {
-    font-size: 28px;
-  }
-
-  .fall-metric-grid strong {
-    font-size: 26px;
+    aspect-ratio: 760 / 340;
   }
 }

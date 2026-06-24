@@ -10,3 +10,4 @@ openpyxl
 pymongo
 pydantic
 imbalanced-learn
+tensorflow
