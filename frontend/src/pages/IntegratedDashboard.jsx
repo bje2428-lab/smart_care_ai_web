@@ -1,34 +1,75 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./IntegratedDashboard.css";
 
-const DEFAULT_API_BASE = "http://127.0.0.1:8000";
-const RAW_API_BASE =
-  import.meta.env.VITE_API_URL ||
-  import.meta.env.VITE_BACKEND_URL ||
-  DEFAULT_API_BASE;
-const API_BASE = RAW_API_BASE.replace(/\/$/, "");
+function parseEnvNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
 
-const PLAY_INTERVAL_MS = 1000;
-const PAGE_SIZE = 5;
-const CODE_VERSION = "integrated_v5_front_ESTIMATION_ONLY";
+function parseEnvJson(value, fallback) {
+  if (!value) return fallback;
 
-const ABNORMAL_ALLOWED_LABELS = [
-  "기타",
-  "수면",
-  "식사",
-  "외출",
-  "주의",
-  "위험",
-];
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    console.warn("환경변수 JSON 파싱 실패:", value, error);
+    return fallback;
+  }
+}
 
-const ABNORMAL_SCORE_MAP = {
-  기타: 18,
-  수면: 22,
-  식사: 30,
-  외출: 38,
-  주의: 65,
-  위험: 92,
-};
+function normalizeApiBase(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\/$/, "");
+}
+
+function parseApiCandidates() {
+  const raw = [
+    import.meta.env.VITE_INTEGRATED_API_URLS,
+    import.meta.env.VITE_API_URLS,
+    import.meta.env.VITE_INTEGRATED_API_URL,
+    import.meta.env.VITE_API_URL,
+    import.meta.env.VITE_BACKEND_URL,
+  ]
+    .filter(Boolean)
+    .join(",");
+
+  const candidates = raw.split(",").map(normalizeApiBase).filter(Boolean);
+
+  // 값이 없으면 현재 프론트 주소 기준의 상대경로를 사용한다.
+  // 개발/배포 주소는 .env에서 관리한다.
+  return candidates.length > 0 ? [...new Set(candidates)] : [""];
+}
+
+const API_CANDIDATES = parseApiCandidates();
+
+const PLAY_INTERVAL_MS = parseEnvNumber(
+  import.meta.env.VITE_INTEGRATED_PLAY_INTERVAL_MS,
+  1000,
+);
+
+const PAGE_SIZE = parseEnvNumber(import.meta.env.VITE_INTEGRATED_PAGE_SIZE, 5);
+
+const CODE_VERSION =
+  import.meta.env.VITE_INTEGRATED_FRONT_CODE_VERSION ||
+  "integrated_front_estimation_only";
+
+const ABNORMAL_ALLOWED_LABELS = parseEnvJson(
+  import.meta.env.VITE_ABNORMAL_ALLOWED_LABELS,
+  ["기타", "수면", "식사", "외출", "주의", "위험"],
+);
+
+const ABNORMAL_SCORE_MAP = parseEnvJson(
+  import.meta.env.VITE_ABNORMAL_SCORE_MAP,
+  {
+    기타: 18,
+    수면: 22,
+    식사: 30,
+    외출: 38,
+    주의: 65,
+    위험: 92,
+  },
+);
 
 function safeNumber(value, fallback = 0) {
   const num = Number(value);
@@ -1517,6 +1558,7 @@ export default function IntegratedDashboard() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [uploadPanelOpen, setUploadPanelOpen] = useState(true);
+  const [apiBase, setApiBase] = useState(API_CANDIDATES[0] || "");
 
   const displaySummary = finalSummary || {
     level: "idle",
@@ -1610,21 +1652,40 @@ export default function IntegratedDashboard() {
   }
 
   async function request(path, options = {}) {
-    const response = await fetch(`${API_BASE}${path}`, options);
+    const candidates = [
+      apiBase,
+      ...API_CANDIDATES.filter((candidate) => candidate !== apiBase),
+    ].filter((candidate, index, array) => array.indexOf(candidate) === index);
 
-    let data = null;
+    let lastError = null;
 
-    try {
-      data = await response.json();
-    } catch (error) {
-      data = null;
+    for (const candidate of candidates) {
+      try {
+        const response = await fetch(`${candidate}${path}`, options);
+
+        let data = null;
+
+        try {
+          data = await response.json();
+        } catch (error) {
+          data = null;
+        }
+
+        if (!response.ok) {
+          throw new Error(getApiErrorMessage(data));
+        }
+
+        if (candidate !== apiBase) {
+          setApiBase(candidate);
+        }
+
+        return data;
+      } catch (error) {
+        lastError = error;
+      }
     }
 
-    if (!response.ok) {
-      throw new Error(getApiErrorMessage(data));
-    }
-
-    return data;
+    throw lastError || new Error("API 서버에 연결할 수 없습니다.");
   }
 
   async function loadSavedLogs() {

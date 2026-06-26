@@ -16,7 +16,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 router = APIRouter(prefix="/integrated", tags=["Integrated Dashboard"])
 
-CODE_VERSION = "integrated_v5_ESTIMATION_ONLY_ROW_SECONDS_LOCK"
+CODE_VERSION = "integrated_v6_ESTIMATION_DB_SAVE_LOCK"
 
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 SAVED_LOGS = []
@@ -2252,11 +2252,11 @@ def predict_vital_chunk(chunk: pd.DataFrame):
     if chunk.empty:
         return {
             "module": "vital",
-            "title": "바이탈",
+            "title": "호흡",
             "state": "대기",
             "level": "idle",
             "risk_score": 0,
-            "reason": "해당 구간의 바이탈 데이터가 없습니다.",
+            "reason": "해당 구간의 호흡 데이터가 없습니다.",
             "status": "Idle",
             "model_mode": "waiting",
             "condition": "-",
@@ -2281,7 +2281,7 @@ def predict_vital_chunk(chunk: pd.DataFrame):
             feature_matrix,
             feature_mean,
             "feature_csv_autoencoder",
-            "전처리 완료 바이탈 feature CSV를 AutoEncoder로 분석했습니다.",
+            "전처리 완료 호흡 feature CSV를 AutoEncoder로 분석했습니다.",
         )
 
     signal = extract_raw_vital_signal(chunk)
@@ -2299,7 +2299,7 @@ def predict_vital_chunk(chunk: pd.DataFrame):
 
     return {
         "module": "vital",
-        "title": "바이탈",
+        "title": "호흡",
         "state": "신호 없음",
         "level": "idle",
         "risk_score": 0,
@@ -2324,6 +2324,17 @@ def predict_vital_chunk(chunk: pd.DataFrame):
 # =========================================================
 # 종합 / 최종 결론 / 저장
 # =========================================================
+
+def to_display_second(raw_second, fallback=1):
+    """
+    내부 계산 second는 0부터 시작하지만 화면/저장 메시지는 1초 구간부터 보여준다.
+    예: cursor=0, second=0.0 -> display_second=1
+    """
+    try:
+        return max(1, int(float(raw_second)) + 1)
+    except Exception:
+        return fallback
+
 
 def make_current_overall(fall_result, abnormal_result, vital_result):
     results = [fall_result, abnormal_result]
@@ -2368,6 +2379,7 @@ def make_fall_summary(ordered):
             "label": "정상",
             "risk_score": 0,
             "second": None,
+            "display_second": None,
             "action": "-",
             "direction": "-",
             "cause": "-",
@@ -2381,18 +2393,21 @@ def make_fall_summary(ordered):
     )
 
     fall = best_fall.get("fall", {})
+    raw_second = best_fall.get("second", 0)
+    display_second = to_display_second(raw_second)
 
     return {
         "detected": True,
         "level": "danger",
         "label": "낙상 발생",
         "risk_score": int(fall.get("risk_score", 0)),
-        "second": best_fall.get("second"),
+        "second": raw_second,
+        "display_second": display_second,
         "action": fall.get("fall_action", "-"),
         "direction": fall.get("fall_direction", "-"),
         "cause": fall.get("fall_cause", "-"),
         "cause_guess": fall.get("cause_guess", "-"),
-        "message": f"{best_fall.get('second')}초 구간에서 낙상이 감지되었습니다.",
+        "message": f"{display_second}초 구간에서 낙상이 감지되었습니다.",
     }
 
 
@@ -2407,6 +2422,8 @@ def make_abnormal_summary(ordered):
     abnormal_events = [
         item for item in ordered
         if item.get("abnormal", {}).get("state") in ["위험", "주의"]
+        or item.get("abnormal", {}).get("level") in ["danger", "warning"]
+        or int(float(item.get("abnormal", {}).get("risk_score", 0) or 0)) >= 65
     ]
 
     if not abnormal_events:
@@ -2416,6 +2433,7 @@ def make_abnormal_summary(ordered):
             "label": latest_abnormal.get("state", "정상") if latest_abnormal else "정상",
             "risk_score": int(latest_abnormal.get("risk_score", 0)) if latest_abnormal else 0,
             "second": None,
+            "display_second": None,
             "state": latest_abnormal.get("state", "-") if latest_abnormal else "-",
             "reason": latest_abnormal.get("reason", "-") if latest_abnormal else "-",
             "message": "위험 또는 주의 이상행동은 감지되지 않았습니다.",
@@ -2427,17 +2445,20 @@ def make_abnormal_summary(ordered):
     )
 
     abnormal = best_abnormal.get("abnormal", {})
-    state = abnormal.get("state", "-")
+    state = normalize_abnormal_state(abnormal.get("state", "-"))
+    raw_second = best_abnormal.get("second", 0)
+    display_second = to_display_second(raw_second)
 
     return {
         "detected": True,
-        "level": abnormal.get("level", "warning"),
+        "level": abnormal.get("level", abnormal_level_by_state(state)),
         "label": state,
-        "risk_score": int(abnormal.get("risk_score", 0)),
-        "second": best_abnormal.get("second"),
+        "risk_score": int(abnormal.get("risk_score", risk_score_by_abnormal_state(state))),
+        "second": raw_second,
+        "display_second": display_second,
         "state": state,
         "reason": abnormal.get("reason", "-"),
-        "message": f"{best_abnormal.get('second')}초 구간에서 {state} 상태가 감지되었습니다.",
+        "message": f"{display_second}초 구간에서 {state} 상태가 감지되었습니다.",
     }
 
 
@@ -2450,11 +2471,14 @@ def make_final_summary(history):
             "message": "아직 실행된 결과가 없습니다.",
             "fall_detected": False,
             "fall_second": None,
+            "fall_display_second": None,
             "fall_action": "-",
             "fall_direction": "-",
             "fall_cause": "-",
             "cause_guess": "-",
             "abnormal_detected": False,
+            "abnormal_second": None,
+            "abnormal_display_second": None,
             "abnormal_type": "-",
             "vital_detected": False,
             "saved": False,
@@ -2489,7 +2513,8 @@ def make_final_summary(history):
 
         message = (
             f"낙상과 이상행동이 각각 독립적으로 감지되었습니다. "
-            f"낙상: {fall_summary['label']}, 이상행동: {abnormal_summary['state']}."
+            f"낙상: {fall_summary['display_second']}초 구간, "
+            f"이상행동: {abnormal_summary['display_second']}초 구간 {abnormal_summary['state']}."
         )
 
     elif fall_summary["detected"]:
@@ -2517,11 +2542,14 @@ def make_final_summary(history):
         "message": message,
         "fall_detected": fall_summary["detected"],
         "fall_second": fall_summary["second"],
+        "fall_display_second": fall_summary["display_second"],
         "fall_action": fall_summary["action"],
         "fall_direction": fall_summary["direction"],
         "fall_cause": fall_summary["cause"],
         "cause_guess": fall_summary["cause_guess"],
         "abnormal_detected": abnormal_summary["detected"],
+        "abnormal_second": abnormal_summary["second"],
+        "abnormal_display_second": abnormal_summary["display_second"],
         "abnormal_type": abnormal_summary["state"],
         "vital_detected": len(vital_events) > 0,
         "saved": fall_summary["detected"] or abnormal_summary["detected"],
@@ -2531,20 +2559,54 @@ def make_final_summary(history):
 
 
 def should_save_event(result, final_summary=None):
-    fall = result.get("fall", {})
-    abnormal = result.get("abnormal", {})
+    """
+    DB 저장 기준.
+    - 낙상: danger/Fall Alert 저장
+    - 이상행동: Estimation 결과가 위험/주의면 저장
+    - 프론트에서만 바뀐 값이 아니라 백엔드 abnormal_result 자체 기준으로 저장한다.
+    """
+    result = result or {}
+    fall = result.get("fall", {}) or {}
+    abnormal = result.get("abnormal", {}) or {}
 
-    if fall.get("level") == "danger":
+    fall_state = clean_text(fall.get("state", ""))
+    fall_level = clean_text(fall.get("level", ""))
+
+    abnormal_state = normalize_abnormal_state(abnormal.get("state", ""))
+    abnormal_level = clean_text(abnormal.get("level", ""))
+    abnormal_risk = int(float(abnormal.get("risk_score", 0) or 0))
+
+    if fall_state == "Fall Alert" or fall_level == "danger":
         return True
 
-    if abnormal.get("state") in ["위험", "주의"]:
+    if abnormal_state in ["위험", "주의"]:
+        return True
+
+    if abnormal_level in ["danger", "warning"]:
+        return True
+
+    if abnormal_risk >= 65:
         return True
 
     if final_summary:
         if final_summary.get("fall_detected"):
             return True
 
-        if final_summary.get("abnormal_summary", {}).get("state") in ["위험", "주의"]:
+        if final_summary.get("abnormal_detected"):
+            return True
+
+        abnormal_summary = final_summary.get("abnormal_summary") or {}
+        summary_state = normalize_abnormal_state(abnormal_summary.get("state", ""))
+        summary_level = clean_text(abnormal_summary.get("level", ""))
+        summary_risk = int(float(abnormal_summary.get("risk_score", 0) or 0))
+
+        if summary_state in ["위험", "주의"]:
+            return True
+
+        if summary_level in ["danger", "warning"]:
+            return True
+
+        if summary_risk >= 65:
             return True
 
     return False
@@ -2893,7 +2955,7 @@ def next_step(session_id: str):
                 "integrated_final_summary",
                 {
                     "session_id": session_id,
-        "code_version": CODE_VERSION,
+                    "code_version": CODE_VERSION,
                     "final_summary": final_summary,
                     "status": session_status(session_id),
                 },
@@ -2945,6 +3007,8 @@ def next_step(session_id: str):
     else:
         current_seconds = round(cursor * step_seconds, 2)
 
+    display_second = cursor + 1
+
     fall_result = predict_fall_chunk(
         fall_chunk,
         fall_already_detected=session.get("fall_confirmed", False),
@@ -2961,6 +3025,7 @@ def next_step(session_id: str):
         "time": now_iso(),
         "step": cursor + 1,
         "second": current_seconds,
+        "display_second": display_second,
         "window": {
             "fps": fps,
             "fall_window_frames": window_frames,
@@ -2977,15 +3042,33 @@ def next_step(session_id: str):
         "db_status": "none",
     }
 
-    event_key = f"{cursor}:{fall_result['level']}:{abnormal_result['state']}"
+    # 먼저 history에 넣고 final_summary를 만든 뒤 저장한다.
+    # 그래야 저장 payload에도 현재 위험/주의 결과와 요약이 같이 들어간다.
+    session["history"].insert(0, result)
+    session["cursor"] += 1
 
-    if should_save_event(result) and event_key not in session["saved_event_keys"]:
+    final_summary = make_final_summary(session["history"])
+    done = session["cursor"] >= total_steps
+
+    event_key = (
+        f"{cursor}:"
+        f"{fall_result.get('state', '-')}:"
+        f"{fall_result.get('level', '-')}:"
+        f"{abnormal_result.get('state', '-')}:"
+        f"{abnormal_result.get('level', '-')}:"
+        f"{abnormal_result.get('risk_score', 0)}"
+    )
+
+    if should_save_event(result, final_summary) and event_key not in session["saved_event_keys"]:
         save_result = save_event_to_db(
             "integrated_realtime_event",
             {
                 "session_id": session_id,
-        "code_version": CODE_VERSION,
+                "code_version": CODE_VERSION,
                 "result": result,
+                "final_summary": final_summary,
+                "status": session_status(session_id),
+                "save_reason": "fall danger 또는 abnormal 위험/주의 감지",
             },
         )
 
@@ -2995,18 +3078,12 @@ def next_step(session_id: str):
 
         session["saved_event_keys"].add(event_key)
 
-    session["history"].insert(0, result)
-    session["cursor"] += 1
-
-    final_summary = make_final_summary(session["history"])
-    done = session["cursor"] >= total_steps
-
     if done and should_save_event({}, final_summary) and not session["final_saved"]:
         save_event_to_db(
             "integrated_final_summary",
             {
                 "session_id": session_id,
-        "code_version": CODE_VERSION,
+                "code_version": CODE_VERSION,
                 "final_summary": final_summary,
                 "status": session_status(session_id),
             },
