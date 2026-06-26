@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import datetime
+import os
 import sys
 import traceback
 
@@ -17,9 +18,29 @@ BACKEND_DIR = Path(__file__).resolve().parent
 RF_DIR = ROOT_DIR / "rf"
 MODEL_DIR = ROOT_DIR / "models"
 
-for path in [ROOT_DIR, BACKEND_DIR, RF_DIR]:
+for path in [ROOT_DIR, BACKEND_DIR, RF_DIR, MODEL_DIR]:
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
+
+
+# =========================================================
+# 환경변수
+# =========================================================
+
+def parse_cors_origins():
+    raw = os.getenv("CORS_ORIGINS", "*").strip()
+
+    if raw == "*":
+        return ["*"]
+
+    return [
+        item.strip()
+        for item in raw.split(",")
+        if item.strip()
+    ]
+
+
+CORS_ORIGINS = parse_cors_origins()
 
 
 # =========================================================
@@ -27,9 +48,12 @@ for path in [ROOT_DIR, BACKEND_DIR, RF_DIR]:
 # =========================================================
 
 app = FastAPI(
-    title="Smart Care AI API",
-    description="스마트 돌봄을 위한 독거노인 안전 관리 AI 협업 관제 플랫폼 API",
-    version="1.0.0",
+    title=os.getenv("APP_TITLE", "Smart Care AI API"),
+    description=os.getenv(
+        "APP_DESCRIPTION",
+        "스마트 돌봄을 위한 독거노인 안전 관리 AI 협업 관제 플랫폼 API",
+    ),
+    version=os.getenv("APP_VERSION", "1.0.0"),
 )
 
 
@@ -39,7 +63,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,9 +72,6 @@ app.add_middleware(
 
 # =========================================================
 # 기본 Health API
-# 주의:
-# React가 API 연결 확인할 때 이 /health를 사용함.
-# 여기서는 모델 로딩, MongoDB 연결 같은 무거운 작업 절대 하지 않음.
 # =========================================================
 
 @app.get("/")
@@ -80,13 +101,12 @@ def health():
         "model_dir": str(MODEL_DIR),
         "rf_dir_exists": RF_DIR.exists(),
         "model_dir_exists": MODEL_DIR.exists(),
+        "cors_origins": CORS_ORIGINS,
     }
 
 
 # =========================================================
 # Router import
-# FallDashboard는 최대한 연결
-# AbnormalDashboard / vital_signal은 없어도 서버 안 죽게 처리
 # =========================================================
 
 fall_router = None
@@ -101,6 +121,9 @@ vital_router = None
 startup_vital_signal = None
 shutdown_vital_signal = None
 vital_import_error = None
+
+integrated_router = None
+integrated_import_error = None
 
 
 try:
@@ -144,6 +167,17 @@ except Exception as e:
     traceback.print_exc()
 
 
+try:
+    from IntegratedDashboard import router as integrated_router
+
+    print("[ROUTER] IntegratedDashboard import 성공")
+
+except Exception as e:
+    integrated_import_error = str(e)
+    print("[ROUTER] IntegratedDashboard import 실패 - 통합 관제 API 비활성화")
+    traceback.print_exc()
+
+
 # =========================================================
 # Router 연결
 # =========================================================
@@ -166,6 +200,12 @@ if vital_router is not None:
 else:
     print("[ROUTER] VitalSignal 연결 안 함")
 
+if integrated_router is not None:
+    app.include_router(integrated_router)
+    print("[ROUTER] IntegratedDashboard 연결 완료")
+else:
+    print("[ROUTER] IntegratedDashboard 연결 안 함")
+
 
 # =========================================================
 # API 정보 확인
@@ -175,17 +215,39 @@ else:
 def api_info():
     return {
         "service": "Smart Care AI API",
-        "version": "1.0.0",
+        "version": os.getenv("APP_VERSION", "1.0.0"),
         "backend_status": "running",
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
 
         "paths": {
             "root": "/",
             "health": "/health",
+
+            # 낙상 API
             "fall_health": "/fall/health",
             "fall_predict": "/predict",
             "fall_events": "/events",
             "fall_stats": "/stats",
+
+            # 이상행동 API
+            "abnormal_health": "/abnormal/health",
+            "abnormal_events": "/abnormal/events",
+
+            # 바이탈 API
+            "vital_health": "/vital/health",
+            "vital_features": "/vital/features",
+            "vital_predict": "/vital/predict",
+            "vital_predict_file": "/vital/predict-file",
+            "vital_history": "/vital/history",
+            "vital_stats": "/vital/stats",
+            "vital_reset": "/vital/reset",
+
+            # 통합 관제 API
+            "integrated_health": "/integrated/health",
+            "integrated_upload": "/integrated/simulation/upload",
+            "integrated_status": "/integrated/simulation/{session_id}/status",
+            "integrated_next": "/integrated/simulation/{session_id}/next",
+            "integrated_reset": "/integrated/simulation/{session_id}/reset",
         },
 
         "routers": {
@@ -201,6 +263,10 @@ def api_info():
                 "loaded": vital_router is not None,
                 "import_error": vital_import_error,
             },
+            "integrated": {
+                "loaded": integrated_router is not None,
+                "import_error": integrated_import_error,
+            },
         },
 
         "directories": {
@@ -211,6 +277,8 @@ def api_info():
             "rf_dir_exists": RF_DIR.exists(),
             "model_dir_exists": MODEL_DIR.exists(),
         },
+
+        "cors_origins": CORS_ORIGINS,
     }
 
 
@@ -226,6 +294,7 @@ def startup_event():
     print(f"BACKEND_DIR : {BACKEND_DIR}")
     print(f"RF_DIR      : {RF_DIR}")
     print(f"MODEL_DIR   : {MODEL_DIR}")
+    print(f"CORS        : {CORS_ORIGINS}")
     print("=========================================")
 
     if startup_fall_dashboard is not None:

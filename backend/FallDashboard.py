@@ -1,1161 +1,1933 @@
-from pathlib import Path
-import json
-import os
-import shutil
-import sys
-import tempfile
 from datetime import datetime
+from io import BytesIO
+from typing import Any, Dict, Optional
+from uuid import uuid4
+import math
+import os
+import traceback
 
-import joblib
+import numpy as np
 import pandas as pd
-from fastapi import APIRouter, UploadFile, File, Query
-
-try:
-    from pymongo import MongoClient, DESCENDING
-except Exception:
-    MongoClient = None
-    DESCENDING = -1
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 
-# =========================================================
-# 경로 설정
-# =========================================================
+router = APIRouter(prefix="/integrated", tags=["Integrated Dashboard"])
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-BACKEND_DIR = Path(__file__).resolve().parent
-RF_DIR = ROOT_DIR / "rf"
-MODEL_DIR = ROOT_DIR / "models"
+SESSIONS: Dict[str, Dict[str, Any]] = {}
 
-for path in [ROOT_DIR, RF_DIR, BACKEND_DIR]:
-    if str(path) not in sys.path:
-        sys.path.insert(0, str(path))
+DEFAULT_FPS = 10
+DEFAULT_FALL_WINDOW_FRAMES = 10
+VITAL_SAMPLE_INTERVAL_SECONDS = 0.003
+VITAL_GENERATED_TIME_COL = "_vital_generated_time"
 
-
-try:
-    from rf.feature_extractor import extract_features_from_csv
-    from rf.predict_csv import postprocess_fall_result, get_fall_probability
-except ModuleNotFoundError:
-    from feature_extractor import extract_features_from_csv
-    from predict_csv import postprocess_fall_result, get_fall_probability
-
-
-router = APIRouter(tags=["Fall Detection"])
-
-
-# =========================================================
-# 기본 설정
-# =========================================================
-
-ASSUMED_FPS = 20
-REALTIME_FRAME_WINDOW = 10
-REALTIME_WINDOW_SECONDS = REALTIME_FRAME_WINDOW / ASSUMED_FPS
-
-# 화면과 판정 기준 통일: 70% 이상이면 Fall Alert
-ALERT_THRESHOLD = 0.70
-
-MODEL_CANDIDATES = [
-    MODEL_DIR / "mmwave_rf_smote_model.pkl",
-    MODEL_DIR / "mmwave_rf_model.pkl",
-    MODEL_DIR / "mmwave_rf_aug_model.pkl",
+RAW_VITAL_TIME_COLS = [
+    "Time_Seconds",
+    "time_seconds",
+    "time",
+    "seconds",
+    "sec",
+    VITAL_GENERATED_TIME_COL,
 ]
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "smart_care_ai")
-MONGO_COLLECTION_NAME = os.getenv("MONGO_COLLECTION_NAME", "detection_events")
+RAW_VITAL_SIGNAL_COLS = [
+    "VitalSignal",
+    "vital_signal",
+    "signal",
+    "value",
+]
+
+RAW_VITAL_CONDITION_COLS = [
+    "Condition",
+    "condition",
+    "label",
+    "state",
+]
+
+VITAL_FEATURE_NAMES = [
+    "mean",
+    "std",
+    "peak_to_peak",
+    "zero_crossings",
+    "fft_mean",
+    "fft_max",
+    "fft_std",
+]
+
+
+# =========================================================
+# vital_signal.py 실제 모델 연동
+# =========================================================
+
+try:
+    import vital_signal as vital_module
+    VITAL_MODULE_IMPORT_ERROR = None
+except Exception as e:
+    vital_module = None
+    VITAL_MODULE_IMPORT_ERROR = str(e)
+
+
+# =========================================================
+# MongoDB optional 연결
+# =========================================================
+
+SAVED_LOGS = []
 
 mongo_client = None
-events_collection = None
+mongo_collection = None
+mongo_error = None
 
-_cached_model = None
-_cached_meta = None
-_cached_model_path = None
+try:
+    from pymongo import MongoClient
+
+    MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
+    MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "smart_care_ai")
+    MONGO_COLLECTION_NAME = os.getenv(
+        "MONGO_INTEGRATED_COLLECTION",
+        "integrated_detection_events",
+    )
+
+    mongo_client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=1500)
+    mongo_client.admin.command("ping")
+    mongo_collection = mongo_client[MONGO_DB_NAME][MONGO_COLLECTION_NAME]
+
+    print("[DB] IntegratedDashboard MongoDB 연결 성공")
+
+except Exception as e:
+    mongo_error = str(e)
+    mongo_client = None
+    mongo_collection = None
+    print("[DB] IntegratedDashboard MongoDB 연결 실패 - 메모리 로그 사용")
 
 
 # =========================================================
-# 유틸
+# 공통 유틸
 # =========================================================
 
-def now_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def now_iso():
+    return datetime.now().isoformat(timespec="seconds")
 
 
-def to_float(value, default: float = 0.0) -> float:
+def clamp(value, min_value=0, max_value=100):
     try:
-        if value is None:
-            return default
-        return float(value)
+        value = float(value)
     except Exception:
+        value = 0
+
+    return max(min_value, min(max_value, value))
+
+
+def find_col(df: pd.DataFrame, candidates):
+    if df is None or df.empty:
+        return None
+
+    lower_map = {str(col).strip().lower(): col for col in df.columns}
+
+    for name in candidates:
+        key = str(name).strip().lower()
+        if key in lower_map:
+            return lower_map[key]
+
+    return None
+
+
+def numeric_series(df: pd.DataFrame, candidates):
+    col = find_col(df, candidates)
+
+    if col is None:
+        return pd.Series(dtype=float)
+
+    return pd.to_numeric(df[col], errors="coerce").dropna()
+
+
+def text_value(df: pd.DataFrame, candidates, default="-"):
+    col = find_col(df, candidates)
+
+    if col is None or df.empty:
         return default
 
+    values = df[col].dropna().astype(str)
 
-def safe_round(value, ndigits=4):
-    return round(to_float(value), ndigits)
+    if values.empty:
+        return default
 
-
-def pick_number(*sources, keys=None, default: float = 0.0) -> float:
-    keys = keys or []
-
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-
-        for key in keys:
-            if key in source and source.get(key) is not None:
-                return to_float(source.get(key), default)
-
-    return default
+    return values.iloc[-1]
 
 
-def get_csv_frame_meta(csv_path: Path) -> dict:
-    df = pd.read_csv(csv_path)
-    df.columns = [str(col).strip() for col in df.columns]
+def mean_value(df: pd.DataFrame, candidates):
+    series = numeric_series(df, candidates)
 
-    required_cols = ["frame", "x", "y", "z", "v"]
-    missing = [col for col in required_cols if col not in df.columns]
+    if series.empty:
+        return None
 
-    if missing:
-        raise ValueError(
-            f"CSV 필수 컬럼이 없습니다. 필요한 컬럼: {required_cols}, 누락: {missing}"
+    return float(series.mean())
+
+
+def json_safe(data):
+    if isinstance(data, dict):
+        return {key: json_safe(value) for key, value in data.items()}
+
+    if isinstance(data, list):
+        return [json_safe(value) for value in data]
+
+    if isinstance(data, tuple):
+        return [json_safe(value) for value in data]
+
+    if isinstance(data, np.integer):
+        return int(data)
+
+    if isinstance(data, np.floating):
+        value = float(data)
+        if math.isnan(value):
+            return None
+        return value
+
+    if isinstance(data, float) and math.isnan(data):
+        return None
+
+    return data
+
+
+async def read_upload_file(file: UploadFile) -> pd.DataFrame:
+    content = await file.read()
+    filename = (file.filename or "").lower()
+
+    try:
+        if filename.endswith(".xlsx") or filename.endswith(".xls"):
+            df = pd.read_excel(BytesIO(content))
+        else:
+            df = pd.read_csv(BytesIO(content))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{file.filename} 파일을 읽을 수 없습니다: {exc}",
         )
 
     if df.empty:
-        raise ValueError("CSV 파일에 데이터가 없습니다.")
-
-    frames = pd.to_numeric(df["frame"], errors="coerce").dropna()
-
-    if frames.empty:
-        frame_start = 0
-        frame_end = 0
-        frame_count = 0
-    else:
-        unique_frames = sorted(frames.astype(int).unique().tolist())
-        frame_start = int(unique_frames[0])
-        frame_end = int(unique_frames[-1])
-        frame_count = len(unique_frames)
-
-    point_count = int(len(df))
-
-    det_obj_values = []
-    if "DetObj#" in df.columns:
-        det_obj_values = (
-            pd.to_numeric(df["DetObj#"], errors="coerce")
-            .dropna()
-            .astype(int)
-            .unique()
-            .tolist()
+        raise HTTPException(
+            status_code=400,
+            detail=f"{file.filename} 파일이 비어 있습니다.",
         )
 
-    return {
-        "frame_start": frame_start,
-        "frame_end": frame_end,
-        "frame_count": frame_count,
-        "point_count": point_count,
-        "det_obj_values": det_obj_values,
-        "assumed_fps": ASSUMED_FPS,
-        "realtime_frame_window": REALTIME_FRAME_WINDOW,
-        "realtime_window_seconds": REALTIME_WINDOW_SECONDS,
-    }
-
-
-def split_csv_by_frame_window(csv_path: Path, window_size: int = REALTIME_FRAME_WINDOW):
-    """
-    전체 CSV를 frame 번호 기준으로 10프레임씩 나눈다.
-    같은 frame에 여러 row가 있을 수 있으므로 row 기준이 아니라 frame 기준으로 자른다.
-    """
-    df = pd.read_csv(csv_path)
     df.columns = [str(col).strip() for col in df.columns]
-
-    if "frame" not in df.columns:
-        raise ValueError("CSV에 frame 컬럼이 없습니다.")
-
-    frames = pd.to_numeric(df["frame"], errors="coerce")
-    df = df.loc[frames.notna()].copy()
-    df["frame"] = frames.loc[frames.notna()].astype(int)
-
-    unique_frames = sorted(df["frame"].unique().tolist())
-
-    chunks = []
-
-    for idx, start in enumerate(range(0, len(unique_frames), window_size)):
-        frame_group = unique_frames[start:start + window_size]
-        if not frame_group:
-            continue
-
-        chunk_df = df[df["frame"].isin(frame_group)].copy()
-
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
-        tmp_path = Path(tmp.name)
-        tmp.close()
-
-        chunk_df.to_csv(tmp_path, index=False)
-
-        chunks.append(
-            {
-                "chunk_index": idx,
-                "tmp_path": tmp_path,
-                "frame_start": int(frame_group[0]),
-                "frame_end": int(frame_group[-1]),
-                "frame_count": len(frame_group),
-                "point_count": int(len(chunk_df)),
-            }
-        )
-
-    return chunks
+    return df
 
 
-def normalize_status(result: dict, fall_prob: float) -> str:
-    """
-    프론트에는 Fall Alert / Normal만 보냄.
-    기준 통일:
-    - fall_prob >= 0.70이면 Fall Alert
-    - postprocess가 Fall Alert라고 해도 Fall Alert
-    - Exception은 Normal
-    """
-    if not isinstance(result, dict):
-        result = {}
+def get_frame_range(df: Optional[pd.DataFrame]):
+    if df is None or df.empty:
+        return 0, 0, 0
 
-    raw_status = str(result.get("status", "")).strip()
-    message = str(result.get("message", "")).strip()
+    frame_col = find_col(df, ["frame", "Frame", "frame_id", "frameId"])
 
-    if raw_status == "Exception":
-        return "Normal"
+    if frame_col:
+        frames = pd.to_numeric(df[frame_col], errors="coerce").dropna()
 
-    if raw_status == "Fall Alert":
-        return "Fall Alert"
+        if frames.empty:
+            return 0, len(df) - 1, len(df)
 
-    if result.get("alert") is True:
-        return "Fall Alert"
+        min_frame = int(frames.min())
+        max_frame = int(frames.max())
+        count = max_frame - min_frame + 1
 
-    if "Fall Alert" in message or "낙상 알림" in message or "알림 발생" in message:
-        return "Fall Alert"
+        return min_frame, max_frame, count
 
-    if fall_prob >= ALERT_THRESHOLD:
-        return "Fall Alert"
-
-    return "Normal"
+    return 0, len(df) - 1, len(df)
 
 
-def build_sensor_feature_table(feat: dict) -> list:
-    descriptions = {
-        "x": ("좌우 위치", "레이더 기준 대상의 좌우 위치 변화"),
-        "y": ("전후 거리", "레이더와 대상 사이의 전후 거리 변화"),
-        "z": ("높이", "대상의 높이 변화. 낙상 시 크게 낮아질 수 있음"),
-        "v": ("속도", "대상의 움직임 속도"),
-    }
+def total_steps_by_window(fall_df, abnormal_df, vital_df, fps, window_frames):
+    total_frame_count = 0
 
-    rows = []
+    for df in [fall_df, abnormal_df]:
+        if df is not None and not df.empty:
+            _, _, frame_count = get_frame_range(df)
+            total_frame_count = max(total_frame_count, frame_count)
 
-    for key, (label, meaning) in descriptions.items():
-        rows.append(
-            {
-                "name": key,
-                "label": label,
-                "meaning": meaning,
-                "mean": safe_round(feat.get(f"{key}_mean")),
-                "min": safe_round(feat.get(f"{key}_min")),
-                "max": safe_round(feat.get(f"{key}_max")),
-                "range": safe_round(feat.get(f"{key}_range")),
-            }
-        )
+    if vital_df is not None and not vital_df.empty:
+        # 바이탈은 0.003초 단위 샘플로 들어온다고 보고,
+        # 통합 화면의 1초 구간 안에서 약 333개 샘플을 묶어 작게 표시한다.
+        window_seconds = window_frames / fps
+        time_col = find_col(vital_df, RAW_VITAL_TIME_COLS)
 
-    return rows
+        if time_col:
+            times = pd.to_numeric(vital_df[time_col], errors="coerce").dropna()
 
-
-def infer_behavior_case(file_name: str, result: dict, all_windows=None) -> dict:
-    """
-    행동 케이스 / 행동 패턴 / 원인 분석
-
-    핵심 원칙:
-    - Normal이면 절대 '낙상 가능성', '균형 상실', '미끄러짐' 같은 표현을 쓰지 않음
-    - Fall Alert일 때만 낙상 케이스를 추정함
-    - 위험도 70% 미만은 정상 또는 주의 행동으로 설명함
-    """
-    name = str(file_name or "").lower()
-    all_windows = all_windows or []
-
-    status = str(result.get("status", "Normal"))
-    fall_prob = to_float(result.get("fall_prob"))
-    speed_max = to_float(result.get("speed_max"))
-    height_drop = to_float(result.get("height_drop"))
-    movement_after = to_float(result.get("movement_after"))
-
-    fall_percent = round(fall_prob * 100)
-
-    is_fall_alert = status == "Fall Alert" and fall_prob >= ALERT_THRESHOLD
-
-    # =====================================================
-    # 1. 정상 데이터 처리
-    # =====================================================
-    if not is_fall_alert:
-        if fall_prob < 0.4:
-            action_case = "normal_movement"
-            action_label = "정상 행동"
-            behavior_pattern = (
-                "낙상 기준선에 도달하지 않은 정상 움직임 패턴입니다. "
-                "속도 변화와 높이 변화가 낙상으로 판단될 만큼 크지 않습니다."
-            )
-            likely_cause = (
-                "일상적인 움직임, 자세 유지, 작은 센서 변화 또는 일반적인 활동으로 판단됩니다."
-            )
-            analysis_summary = (
-                f"정상 행동으로 판단됩니다. 낙상 위험도는 {fall_percent}%로 "
-                "Fall Alert 기준인 70%보다 낮습니다."
-            )
-
-        elif fall_prob < ALERT_THRESHOLD:
-            action_case = "normal_or_attention_movement"
-            action_label = "정상 또는 주의 행동"
-            behavior_pattern = (
-                "일부 움직임 변화는 감지되었지만 낙상 기준선에는 도달하지 않았습니다. "
-                "앉기, 일어서기, 방향 전환, 물건 줍기 같은 일반 행동일 수 있습니다."
-            )
-            likely_cause = (
-                "일상 동작 중 순간적인 자세 변화가 있었지만 낙상으로 볼 만큼의 "
-                "위험 패턴은 부족합니다."
-            )
-            analysis_summary = (
-                f"주의가 필요한 움직임은 있으나 최종 판단은 정상입니다. "
-                f"낙상 위험도는 {fall_percent}%이며 Fall Alert 기준 70% 미만입니다."
-            )
+            if not times.empty:
+                min_time = float(times.min())
+                max_time = float(times.max())
+                duration = max(
+                    VITAL_SAMPLE_INTERVAL_SECONDS,
+                    (max_time - min_time) + VITAL_SAMPLE_INTERVAL_SECONDS,
+                )
+                vital_steps = max(1, math.ceil(duration / window_seconds))
+                total_frame_count = max(total_frame_count, vital_steps * window_frames)
 
         else:
-            action_case = "normal_by_rule"
-            action_label = "정상 판단"
-            behavior_pattern = (
-                "모델 위험도는 일부 높게 나왔지만 후처리 기준상 낙상 알림으로 확정되지 않았습니다."
-            )
-            likely_cause = (
-                "낙상과 유사한 자세 변화가 있었지만 이후 움직임이나 속도 조건이 "
-                "Fall Alert 기준을 충분히 만족하지 않았을 수 있습니다."
-            )
-            analysis_summary = (
-                "낙상과 유사한 신호가 일부 있었지만 최종 판단은 정상입니다."
+            second_col = find_col(
+                vital_df,
+                ["second", "seconds", "sec", "time_sec", "time_seconds"],
             )
 
-        risk_reason = [
-            f"낙상 위험도 {fall_percent}%로 Fall Alert 기준 70% 미만입니다.",
-            f"최대 속도 {round(speed_max, 4)} m/s로 낙상 충격 패턴으로 보기 어렵습니다.",
-            f"높이 변화 {round(height_drop, 4)} m로 강한 낙상 기준에 도달하지 않았습니다.",
-            f"이후 이동거리 {round(movement_after * 100, 2)} cm가 확인되었습니다.",
-            "최종 상태가 Normal이므로 보호자 알림 대상이 아닙니다.",
-        ]
+            if second_col:
+                seconds = pd.to_numeric(vital_df[second_col], errors="coerce").dropna()
 
-        recommendations = [
-            "보호자 즉시 알림은 필요하지 않습니다.",
-            "정상 데이터로 처리하고 DB 저장 대상에서 제외합니다.",
-            "동일 사용자의 비슷한 움직임이 반복되면 이상행동 페이지에서 별도 추세로 확인할 수 있습니다.",
-        ]
+                if not seconds.empty:
+                    duration = float(seconds.max()) + window_seconds
+                    vital_steps = max(1, math.ceil(duration / window_seconds))
+                    total_frame_count = max(total_frame_count, vital_steps * window_frames)
+            else:
+                duration = len(vital_df) * VITAL_SAMPLE_INTERVAL_SECONDS
+                vital_steps = max(1, math.ceil(duration / window_seconds))
+                total_frame_count = max(total_frame_count, vital_steps * window_frames)
 
-        return {
-            "action_case": action_case,
-            "action_label": action_label,
-            "behavior_pattern": behavior_pattern,
-            "likely_cause": likely_cause,
-            "direction": "해당 없음",
-            "risk_reason": risk_reason,
-            "recommendations": recommendations,
-            "analysis_summary": analysis_summary,
-        }
+    if total_frame_count <= 0:
+        total_frame_count = fps
 
-    # =====================================================
-    # 2. Fall Alert일 때만 낙상 케이스 분석
-    # =====================================================
+    return max(1, math.ceil(total_frame_count / window_frames))
 
-    direction = "방향 정보 부족"
 
-    if "forward" in name or "front" in name:
-        direction = "앞쪽 방향으로 넘어짐"
-    elif "back" in name or "backward" in name:
-        direction = "뒤쪽 방향으로 넘어짐"
-    elif "left" in name:
-        direction = "왼쪽 방향으로 넘어짐"
-    elif "right" in name:
-        direction = "오른쪽 방향으로 넘어짐"
+def slice_by_frame_window(df, step, fps, window_frames, mode):
+    if df is None or df.empty:
+        return pd.DataFrame()
 
-    action_case = "general_fall"
-    action_label = "일반 낙상"
-    behavior_pattern = (
-        "짧은 시간 안에 높이 변화와 속도 변화가 함께 발생한 낙상 패턴입니다."
+    current_frame_offset = step * window_frames
+    current_second = current_frame_offset / fps
+    window_seconds = window_frames / fps
+
+    if mode == "vital":
+        time_col = find_col(df, RAW_VITAL_TIME_COLS)
+
+        if time_col:
+            times = pd.to_numeric(df[time_col], errors="coerce")
+            valid_times = times.dropna()
+
+            if valid_times.empty:
+                return pd.DataFrame()
+
+            min_time = float(valid_times.min())
+            start_time = min_time + current_second
+            end_time = start_time + window_seconds
+
+            return df[(times >= start_time) & (times < end_time)].copy()
+
+    frame_col = find_col(df, ["frame", "Frame", "frame_id", "frameId"])
+
+    if frame_col:
+        frames = pd.to_numeric(df[frame_col], errors="coerce")
+        min_frame = frames.min()
+
+        start = min_frame + current_frame_offset
+        end = start + window_frames
+
+        return df[(frames >= start) & (frames < end)].copy()
+
+    second_col = find_col(df, ["second", "seconds", "sec", "time_sec", "time_seconds"])
+
+    if second_col:
+        seconds = pd.to_numeric(df[second_col], errors="coerce")
+        target_second = math.floor(current_second)
+        return df[seconds == target_second].copy()
+
+    if mode == "vital":
+        # 시간 컬럼이 없는 바이탈 CSV는 행 하나를 0.003초 샘플로 간주한다.
+        # 현재 통합 구간(기본 1초)에 해당하는 여러 샘플을 묶어서 분석한다.
+        start_row = int(math.floor(current_second / VITAL_SAMPLE_INTERVAL_SECONDS))
+        end_row = int(math.ceil((current_second + window_seconds) / VITAL_SAMPLE_INTERVAL_SECONDS))
+        chunk = df.iloc[start_row:end_row].copy()
+
+        if not chunk.empty:
+            generated_times = np.arange(start_row, start_row + len(chunk), dtype=float)
+            chunk[VITAL_GENERATED_TIME_COL] = np.round(
+                generated_times * VITAL_SAMPLE_INTERVAL_SECONDS,
+                6,
+            )
+
+        return chunk
+
+    start = current_frame_offset
+    end = start + window_frames
+
+    return df.iloc[start:end].copy()
+
+
+def center_points(df: pd.DataFrame):
+    x_col = find_col(df, ["x"])
+    y_col = find_col(df, ["y"])
+    z_col = find_col(df, ["z"])
+    frame_col = find_col(df, ["frame", "Frame", "frame_id", "frameId"])
+
+    if not x_col or not y_col or not z_col:
+        return pd.DataFrame(columns=["x", "y", "z"])
+
+    temp = df[[x_col, y_col, z_col]].copy()
+    temp.columns = ["x", "y", "z"]
+    temp = temp.apply(pd.to_numeric, errors="coerce").dropna()
+
+    if temp.empty:
+        return temp
+
+    if frame_col:
+        frames = pd.to_numeric(df.loc[temp.index, frame_col], errors="coerce")
+        temp["frame"] = frames
+        temp = temp.dropna()
+        return temp.groupby("frame")[["x", "y", "z"]].mean().reset_index(drop=True)
+
+    return temp[["x", "y", "z"]]
+
+
+def movement_after_value(df: pd.DataFrame):
+    centers = center_points(df)
+
+    if len(centers) < 2:
+        return 0.0
+
+    diffs = centers[["x", "y", "z"]].diff().dropna()
+    movement = np.sqrt((diffs ** 2).sum(axis=1))
+
+    if len(movement) == 0:
+        return 0.0
+
+    start = int(len(movement) * 0.6)
+    return float(movement.iloc[start:].mean())
+
+
+# =========================================================
+# 낙상 분석
+# =========================================================
+
+def infer_fall_action(
+    chunk,
+    height_drop,
+    speed_max,
+    movement_after,
+    fall_already_detected=False,
+):
+    behavior_label = text_value(
+        chunk,
+        ["behavior_label", "behavior", "action", "activity", "state", "label"],
+        default="-",
     )
-    likely_cause = "균형 상실, 미끄러짐, 갑작스러운 자세 변화 가능성이 있습니다."
 
-    if "standing" in name or "stand" in name:
-        action_case = "fall_after_standing"
-        action_label = "서 있다가 낙상"
-        behavior_pattern = (
-            "서 있는 상태에서 중심 높이가 급격히 낮아지고, "
-            "이후 움직임이 줄어드는 패턴입니다."
-        )
-        likely_cause = "기립 상태에서 균형 상실, 어지럼증, 발 헛디딤 가능성이 있습니다."
+    scenario = text_value(
+        chunk,
+        ["scenario", "scene", "phase"],
+        default="-",
+    )
 
-    elif "sitting" in name or "sit" in name:
-        action_case = "fall_from_sitting"
-        action_label = "앉아있다가 낙상"
-        behavior_pattern = (
-            "앉은 자세 또는 낮은 자세에서 몸의 중심이 바닥 방향으로 더 낮아지는 패턴입니다."
-        )
-        likely_cause = "의자나 바닥에서 자세를 바꾸는 과정에서 균형을 잃었을 가능성이 있습니다."
+    description = text_value(
+        chunk,
+        ["description", "desc", "actual_reason", "reason"],
+        default="-",
+    )
 
-    elif "chair" in name:
-        action_case = "fall_from_chair"
-        action_label = "의자에서 낙상"
-        behavior_pattern = (
-            "의자 높이 부근에서 시작해 짧은 시간 안에 높이가 크게 낮아지는 패턴입니다."
-        )
-        likely_cause = "의자에서 일어나거나 앉는 과정에서 미끄러짐 또는 중심 상실 가능성이 있습니다."
+    text = f"{behavior_label} {scenario} {description}".lower()
 
-    elif "bed" in name:
-        action_case = "fall_from_bed"
-        action_label = "침대에서 낙상"
-        behavior_pattern = "침대 높이에서 바닥 방향으로 높이가 낮아지는 패턴입니다."
-        likely_cause = "침대에서 내려오거나 몸을 돌리는 과정에서 떨어졌을 가능성이 있습니다."
+    has_fall_word = (
+        "fall_forward" in text
+        or "fall_backward" in text
+        or "fall_left" in text
+        or "fall_right" in text
+        or "fall_alert" in text
+        or "fall alert" in text
+        or "낙상" in text
+    )
 
-    elif "walk" in name or "walking" in name:
-        action_case = "fall_after_walking"
-        action_label = "걷다가 낙상"
-        behavior_pattern = (
-            "이동 중 속도 변화가 나타난 뒤 높이가 급격히 낮아지는 패턴입니다."
-        )
-        likely_cause = "보행 중 장애물, 미끄러짐, 다리 힘 풀림 가능성이 있습니다."
+    has_post_fall_word = (
+        "post_fall" in text
+        or "after_fall" in text
+        or "fall_no_movement" in text
+        or "fall_no_movement" in text
+        or "낙상 후" in text
+        or "낙상후" in text
+    )
 
-    elif "run" in name or "running" in name:
-        action_case = "fall_after_running"
-        action_label = "빠르게 이동하다가 낙상"
-        behavior_pattern = (
-            "속도 변화가 크게 나타난 뒤 중심 높이가 급격히 떨어지는 패턴입니다."
-        )
-        likely_cause = "빠른 이동 중 발 헛디딤 또는 급정지로 인한 균형 상실 가능성이 있습니다."
+    has_real_fall_motion = (
+        height_drop >= 0.45 and speed_max >= 0.60
+    ) or (
+        height_drop >= 0.65
+    ) or (
+        has_fall_word and height_drop >= 0.35 and speed_max >= 0.35
+    )
 
-    elif "lie" in name or "lying" in name:
-        action_case = "lying_or_fall"
-        action_label = "눕기 동작 또는 낙상 의심"
-        behavior_pattern = (
-            "높이가 낮아지는 패턴이 있으나 눕기 동작과 낙상이 유사할 수 있습니다."
-        )
-        likely_cause = "침대나 바닥에 눕는 동작일 수 있어 추가 확인이 필요합니다."
+    if has_post_fall_word and fall_already_detected:
+        action = "낙상 후 무움직임"
+        direction = "바닥에 머문 상태"
+        cause_guess = "이전 구간에서 낙상이 감지된 뒤 움직임이 거의 없습니다."
+
+    elif has_post_fall_word and not fall_already_detected:
+        action = "무활동 상태"
+        direction = "방향 정보 없음"
+        cause_guess = "움직임은 적지만 앞선 낙상 감지가 없어 낙상 후 상태로 보지 않습니다."
+
+    elif "fall_forward" in text and has_real_fall_motion:
+        action = "걷다가 전방 낙상"
+        direction = "전방 방향 추정"
+        cause_guess = "이동 중 몸의 높이가 급격히 낮아지고 속도 변화가 크게 나타났습니다."
+
+    elif has_fall_word and has_real_fall_motion:
+        action = "낙상 발생"
+        direction = "전방 또는 측면 방향 추정"
+        cause_guess = "낙상 라벨과 센서의 높이 변화, 속도 변화가 함께 나타났습니다."
+
+    elif "walking" in text or "walk" in text or "보행" in text or "걷" in text:
+        if has_real_fall_motion:
+            action = "걷다가 낙상"
+            direction = "전방 또는 측면 방향 추정"
+            cause_guess = "보행 중 높이 변화와 속도 변화가 함께 나타났습니다."
+        else:
+            action = "보행"
+            direction = "이동 방향 정보 부족"
+            cause_guess = "보행 상태이지만 낙상으로 볼 만큼의 높이 급감은 없습니다."
+
+    elif "sit" in text or "앉" in text:
+        action = "빠른 자세변화"
+        direction = "하방 이동"
+        cause_guess = "앉는 동작과 낙상이 유사할 수 있으나 낙상 기준을 별도로 확인해야 합니다."
+
+    elif height_drop >= 0.7 and speed_max >= 0.8:
+        action = "이동 중 낙상"
+        direction = "전방 또는 측면 방향 추정"
+        cause_guess = "높이 하강과 속도 변화가 동시에 나타났습니다."
+
+    elif height_drop >= 0.45 and speed_max >= 0.60:
+        action = "자세 변화 중 낙상 의심"
+        direction = "하방 이동"
+        cause_guess = "상체 높이 변화와 속도 변화가 함께 나타났습니다."
+
+    elif movement_after <= 0.2 and speed_max <= 0.25 and height_drop < 0.30:
+        action = "무활동 상태"
+        direction = "방향 정보 없음"
+        cause_guess = "움직임이 거의 없지만 낙상 전 높이 급감이나 속도 증가가 없어 낙상으로 판단하지 않습니다."
+
+    else:
+        action = "낙상 가능성 낮음"
+        direction = "방향 정보 부족"
+        cause_guess = "낙상 기준을 넘는 변화가 충분하지 않습니다."
+
+    causes = []
+
+    if height_drop >= 0.70:
+        causes.append("높이가 급격히 낮아졌습니다.")
+    elif height_drop >= 0.45:
+        causes.append("상체 높이 변화가 크게 나타났습니다.")
 
     if speed_max >= 1.2:
-        impact_text = "순간 속도가 커서 충격성 움직임이 강합니다."
-    elif speed_max >= 0.6:
-        impact_text = "중간 수준 이상의 속도 변화가 있습니다."
+        causes.append("순간 속도가 매우 크게 증가했습니다.")
+    elif speed_max >= 0.8:
+        causes.append("중간 수준 이상의 속도 변화가 있습니다.")
+
+    if movement_after <= 0.2 and has_real_fall_motion:
+        causes.append("동작 이후 움직임이 거의 없어 낙상 후 움직임 감소로 볼 수 있습니다.")
+    elif movement_after <= 0.2 and not has_real_fall_motion:
+        causes.append("움직임은 적지만 낙상 전 높이 급감이나 속도 증가가 부족합니다.")
+    elif movement_after <= 0.5 and has_real_fall_motion:
+        causes.append("동작 이후 이동이 줄었습니다.")
+
+    if description != "-":
+        causes.append(description)
+
+    if not causes:
+        causes.append("낙상 기준을 넘는 변화는 크지 않습니다.")
+
+    return action, direction, cause_guess, " ".join(causes), scenario, description
+
+def predict_fall_chunk(chunk: pd.DataFrame, fall_already_detected=False):
+    if chunk.empty:
+        return {
+            "module": "fall",
+            "title": "낙상 감지",
+            "state": "대기",
+            "level": "idle",
+            "risk_score": 0,
+            "reason": "해당 구간의 낙상 데이터가 없습니다.",
+            "fall_action": "-",
+            "fall_direction": "-",
+            "fall_cause": "-",
+            "cause_guess": "-",
+            "scenario": "-",
+            "description": "-",
+            "features": {
+                "fall_prob": 0,
+                "speed_max": 0,
+                "speed_mean": 0,
+                "height_drop": 0,
+                "movement_after": 0,
+                "z_mean": 0,
+                "z_min": 0,
+                "z_max": 0,
+            },
+        }
+
+    v = numeric_series(chunk, ["v", "velocity", "speed"])
+    z = numeric_series(chunk, ["z", "height"])
+
+    speed_max = float(v.abs().max()) if not v.empty else 0.0
+    speed_mean = float(v.abs().mean()) if not v.empty else 0.0
+
+    z_mean = float(z.mean()) if not z.empty else 0.0
+    z_min = float(z.min()) if not z.empty else 0.0
+    z_max = float(z.max()) if not z.empty else 0.0
+    height_drop = float(z_max - z_min) if not z.empty else 0.0
+
+    movement_after = movement_after_value(chunk)
+
+    behavior_label = text_value(
+        chunk,
+        ["behavior_label", "behavior", "action", "activity", "state", "label"],
+        default="-",
+    )
+
+    scenario = text_value(
+        chunk,
+        ["scenario", "scene", "phase"],
+        default="-",
+    )
+
+    description = text_value(
+        chunk,
+        ["description", "desc", "actual_reason", "reason"],
+        default="-",
+    )
+
+    text = f"{behavior_label} {scenario} {description}".lower()
+
+    has_fall_word = (
+        "fall_forward" in text
+        or "fall_backward" in text
+        or "fall_left" in text
+        or "fall_right" in text
+        or "fall_alert" in text
+        or "fall alert" in text
+        or "낙상" in text
+    )
+
+    has_post_fall_word = (
+        "post_fall" in text
+        or "after_fall" in text
+        or "fall_no_movement" in text
+        or "낙상 후" in text
+        or "낙상후" in text
+    )
+
+    height_trigger = height_drop >= 0.45
+    speed_trigger = speed_max >= 0.60
+    strong_height_trigger = height_drop >= 0.65
+
+    real_fall_motion = (
+        height_trigger and speed_trigger
+    ) or (
+        strong_height_trigger
+    ) or (
+        has_fall_word and height_drop >= 0.35 and speed_max >= 0.35
+    )
+
+    # 움직임이 거의 없는 것만으로는 낙상이 아님.
+    only_no_movement = (
+        movement_after <= 0.2
+        and speed_max <= 0.25
+        and height_drop < 0.30
+        and not has_fall_word
+    )
+
+    score = 0
+
+    if not only_no_movement:
+        if height_drop >= 0.70:
+            score += 45
+        elif height_drop >= 0.55:
+            score += 36
+        elif height_drop >= 0.40:
+            score += 24
+        elif height_drop >= 0.25:
+            score += 10
+
+        if speed_max >= 1.20:
+            score += 35
+        elif speed_max >= 0.90:
+            score += 28
+        elif speed_max >= 0.60:
+            score += 16
+        elif speed_max >= 0.40:
+            score += 6
+
+        # 후반 움직임 감소는 낙상 핵심 조건이 있을 때만 가산.
+        if real_fall_motion:
+            if movement_after <= 0.20:
+                score += 20
+            elif movement_after <= 0.40:
+                score += 13
+            elif movement_after <= 0.60:
+                score += 6
+
+    # 낙상 이후 무움직임은 이전 구간에서 실제 Fall Alert가 난 뒤에만 위험 유지.
+    if has_post_fall_word and fall_already_detected:
+        score = max(score, 80)
+
+    # post_fall 라벨이 있어도 이전 낙상이 없고 센서 변화도 약하면 정상/낮은 점수 처리.
+    if has_post_fall_word and not fall_already_detected and not real_fall_motion:
+        score = min(score, 25)
+
+    # 낙상 라벨 단어가 있어도 센서 변화가 너무 약하면 Fall Alert로 올리지 않음.
+    if has_fall_word and not real_fall_motion:
+        score = min(score, 35)
+
+    risk_score = int(clamp(score))
+
+    fall_action, fall_direction, cause_guess, fall_cause, scenario, description = infer_fall_action(
+        chunk,
+        height_drop,
+        speed_max,
+        movement_after,
+        fall_already_detected=fall_already_detected,
+    )
+
+    if risk_score >= 70 and (real_fall_motion or fall_already_detected):
+        state = "Fall Alert"
+        level = "danger"
+        reason = "10프레임, 즉 1초 구간에서 낙상 패턴이 감지되었습니다."
+
+    elif risk_score >= 40:
+        state = "주의"
+        level = "warning"
+        reason = "낙상과 유사한 움직임이 감지되었지만 Fall Alert 기준은 넘지 않았습니다."
+
     else:
-        impact_text = "속도 변화는 크지 않지만 다른 낙상 조건과 함께 판단되었습니다."
+        state = "Normal"
+        level = "normal"
 
-    if height_drop >= 0.8:
-        height_text = "높이 변화가 매우 커서 서 있던 자세에서 바닥 방향으로 내려간 패턴에 가깝습니다."
-    elif height_drop >= 0.4:
-        height_text = "높이 변화가 있어 낙상 가능성을 판단할 수 있습니다."
-    else:
-        height_text = "높이 변화는 크지 않지만 모델 위험도와 후속 움직임을 함께 고려했습니다."
-
-    if movement_after <= 0.2:
-        after_text = "동작 이후 이동이 적어 낙상 후 움직임이 줄어든 상태로 볼 수 있습니다."
-    else:
-        after_text = "동작 이후 움직임이 남아 있어 추가 확인이 필요합니다."
-
-    risk_reason = [
-        f"낙상 위험도 {fall_percent}%로 Fall Alert 기준 70% 이상입니다.",
-        impact_text,
-        height_text,
-        after_text,
-        f"방향 추정: {direction}",
-    ]
-
-    recommendations = [
-        "보호자 또는 관리자 확인이 필요합니다.",
-        "낙상 구간 전후의 센서 로그를 확인하세요.",
-        "후속 움직임이 거의 없다면 즉시 연락 또는 방문 확인이 필요합니다.",
-    ]
+        if only_no_movement or (has_post_fall_word and not fall_already_detected):
+            reason = "움직임은 적지만 낙상 전 높이 급감이나 속도 증가가 없어 낙상으로 판단하지 않습니다."
+        else:
+            reason = "낙상 기준을 넘지 않았습니다."
 
     return {
-        "action_case": action_case,
-        "action_label": action_label,
-        "behavior_pattern": behavior_pattern,
-        "likely_cause": likely_cause,
-        "direction": direction,
-        "risk_reason": risk_reason,
-        "recommendations": recommendations,
-        "analysis_summary": f"{action_label} 가능성이 가장 높습니다. {behavior_pattern}",
+        "module": "fall",
+        "title": "낙상 감지",
+        "state": state,
+        "level": level,
+        "risk_score": risk_score,
+        "reason": reason,
+        "fall_action": fall_action,
+        "fall_direction": fall_direction,
+        "fall_cause": fall_cause,
+        "cause_guess": cause_guess,
+        "scenario": scenario,
+        "description": description,
+        "features": {
+            "fall_prob": round(risk_score / 100, 4),
+            "speed_max": round(speed_max, 4),
+            "speed_mean": round(speed_mean, 4),
+            "height_drop": round(height_drop, 4),
+            "movement_after": round(movement_after, 4),
+            "z_mean": round(z_mean, 4),
+            "z_min": round(z_min, 4),
+            "z_max": round(z_max, 4),
+        },
     }
 
 
-def build_normalized_frontend_result(
-    result: dict,
-    feat: dict,
-    fall_prob: float,
-    pred_label,
-    model_threshold: float,
-    threshold_pred_label: str,
-    file_name: str,
-    meta: dict,
-    frame_meta: dict,
-) -> dict:
-    result = result if isinstance(result, dict) else {}
-    feat = feat if isinstance(feat, dict) else {}
-    meta = meta if isinstance(meta, dict) else {}
-    frame_meta = frame_meta if isinstance(frame_meta, dict) else {}
+# =========================================================
+# 이상행동 분석
+# =========================================================
 
-    fall_prob = to_float(fall_prob, 0.0)
-    fall_percent = round(fall_prob * 100, 2)
+def risk_score_by_state(state: str):
+    text = str(state or "").lower()
 
-    speed_max = pick_number(
-        result,
-        feat,
-        keys=[
-            "speed_max",
-            "max_speed",
-            "v_abs_max",
-            "abs_v_max",
-            "v_max_abs",
-            "v_max",
-            "velocity_max",
-        ],
+    if (
+        "fall" in text
+        or "post_fall" in text
+        or "낙상" in text
+        or "no_movement" in text
+    ):
+        return 35
+
+    if "위험" in text or "danger" in text or "emergency" in text:
+        return 80
+
+    if "배회" in text or "wandering" in text:
+        return 72
+
+    if "무활동" in text or "inactive" in text:
+        return 65
+
+    if "주의" in text or "warning" in text or "abnormal" in text or "이상" in text:
+        return 60
+
+    if "빠르게" in text or "fast" in text:
+        return 55
+
+    if "외출" in text or "outing" in text:
+        return 38
+
+    if "식사" in text or "meal" in text:
+        return 30
+
+    if "수면" in text or "sleep" in text or "rest" in text:
+        return 22
+
+    return 18
+
+
+def classify_abnormal_type(state, behavior, speed_max, movement_after):
+    text = f"{state} {behavior}".lower()
+
+    if "fall_forward" in text or "post_fall" in text or "낙상" in text:
+        return "낙상 관련 상태", "낙상 감지 결과에 포함되는 상태이므로 이상행동 위험도로 중복 계산하지 않습니다."
+
+    if "wandering" in text or "배회" in text:
+        return "배회 행동", "같은 공간에서 반복적인 이동 패턴이 나타났습니다."
+
+    if "inactive" in text or "무활동" in text or "no_movement" in text:
+        return "무활동 주의", "움직임이 거의 없는 상태입니다."
+
+    if "sit_fast" in text or "빠르게" in text or "fast" in text:
+        return "급격한 자세 변화", "빠르게 앉거나 자세가 급변한 행동으로 판단됩니다."
+
+    if "sleep" in text or "rest" in text or "수면" in text:
+        return "휴식 또는 수면", "휴식 상태로 판단되며 위험도는 낮습니다."
+
+    if speed_max >= 0.8 and movement_after >= 0.35:
+        return "활동량 증가", "평소보다 빠른 움직임이 감지되었습니다."
+
+    if speed_max <= 0.05 and movement_after <= 0.03:
+        return "무활동 주의", "움직임이 거의 없는 상태입니다."
+
+    return "정상 활동", "이상행동 기준을 넘지 않았습니다."
+
+
+def predict_abnormal_chunk(chunk: pd.DataFrame):
+    if chunk.empty:
+        return {
+            "module": "abnormal",
+            "title": "이상행동",
+            "state": "대기",
+            "level": "idle",
+            "risk_score": 0,
+            "reason": "해당 구간의 이상행동 데이터가 없습니다.",
+            "behavior": "-",
+            "abnormal_type": "-",
+            "detail": "-",
+            "guardian_alert": False,
+            "guardian_message": "데이터 대기 중입니다.",
+            "heart_rate": None,
+            "respiratory_rate": None,
+            "temperature": None,
+            "features": {},
+        }
+
+    state = text_value(
+        chunk,
+        ["state", "label", "activity", "actual_state", "class", "target"],
+        default="Normal",
     )
 
-    height_drop = pick_number(
-        result,
-        feat,
-        keys=[
-            "height_drop",
-            "z_drop",
-            "z_range",
-            "z_center_drop",
-            "z_center_first_to_min_drop",
-            "z_center_peak_to_last_drop",
-            "max_height_drop",
-        ],
+    behavior = text_value(
+        chunk,
+        ["behavior_label", "behavior", "action", "activity"],
+        default=state,
     )
 
-    movement_after = pick_number(
-        result,
-        feat,
-        keys=[
-            "movement_after",
-            "movement_after_fall",
-            "after_movement",
-            "tail_movement",
-            "movement_after_mean",
-            "center_move_tail_mean",
-            "center_move_after",
-        ],
+    description = text_value(
+        chunk,
+        ["description", "desc", "actual_reason", "reason"],
+        default="-",
     )
 
-    status = normalize_status(result, fall_prob)
-    alert = status == "Fall Alert"
+    heart_rate = mean_value(
+        chunk,
+        ["heart_rate", "heartRate", "hr", "bpm"],
+    )
 
-    if status == "Fall Alert":
-        message = result.get(
-            "message",
-            "낙상으로 판단되었습니다. Fall Alert 이벤트를 MongoDB에 저장합니다.",
-        )
-        alert_message = "알림 발생"
+    respiratory_rate = mean_value(
+        chunk,
+        ["respiratory_rate", "respiratoryRate", "rr", "breath_rate", "breathRate"],
+    )
+
+    temperature = mean_value(
+        chunk,
+        ["temperature", "temp", "body_temp"],
+    )
+
+    v = numeric_series(chunk, ["v", "velocity", "speed"])
+    speed_max = float(v.abs().max()) if not v.empty else 0.0
+    movement_after = movement_after_value(chunk)
+
+    abnormal_type, detail = classify_abnormal_type(
+        state,
+        behavior,
+        speed_max,
+        movement_after,
+    )
+
+    risk_score = risk_score_by_state(f"{state} {behavior} {abnormal_type}")
+
+    if risk_score >= 80:
+        level = "danger"
+    elif risk_score >= 50:
+        level = "warning"
     else:
-        message = "정상 행동으로 판단되었습니다. 낙상 알림 기준에 도달하지 않아 DB에는 저장하지 않습니다."
-        alert_message = "알림 없음"
+        level = "normal"
 
-    normalized = dict(result)
+    if description != "-":
+        detail = f"{detail} {description}"
 
-    normalized.update(
-        {
-            "status": status,
-            "alert": alert,
-            "alert_message": alert_message,
-            "message": message,
+    guardian_alert = risk_score >= 70
 
-            "file_name": file_name,
-            "filename": file_name,
+    if guardian_alert:
+        guardian_message = "주의 이상의 이상행동이 감지되어 보호자 확인이 필요합니다."
+    else:
+        guardian_message = "보호자 알림 없이 관제 화면에만 기록됩니다."
 
-            "fall_prob": round(fall_prob, 4),
-            "fall_probability": round(fall_prob, 4),
-            "raw_model_fall_prob": round(fall_prob, 4),
-            "fall_risk": round(fall_prob, 4),
-            "fall_risk_percent": fall_percent,
-            "risk_score": fall_percent,
-
+    return {
+        "module": "abnormal",
+        "title": "이상행동",
+        "state": state,
+        "level": level,
+        "risk_score": risk_score,
+        "reason": detail,
+        "behavior": behavior,
+        "abnormal_type": abnormal_type,
+        "detail": detail,
+        "guardian_alert": guardian_alert,
+        "guardian_message": guardian_message,
+        "heart_rate": round(heart_rate, 1) if heart_rate is not None else None,
+        "respiratory_rate": round(respiratory_rate, 1) if respiratory_rate is not None else None,
+        "temperature": round(temperature, 1) if temperature is not None else None,
+        "features": {
             "speed_max": round(speed_max, 4),
-            "max_speed": round(speed_max, 4),
-            "height_drop": round(height_drop, 4),
             "movement_after": round(movement_after, 4),
-            "movement_after_cm": round(movement_after * 100, 2),
-
-            "model_pred_label": str(pred_label),
-            "model_threshold": round(float(model_threshold), 4),
-            "display_alert_threshold": ALERT_THRESHOLD,
-            "threshold_pred_label": threshold_pred_label,
-
-            "loaded_model_path": meta.get("_loaded_model_path"),
-            "loaded_meta_path": meta.get("_loaded_meta_path"),
-
-            "frame_start": frame_meta.get("frame_start", 0),
-            "frame_end": frame_meta.get("frame_end", 0),
-            "frame_count": frame_meta.get("frame_count", 0),
-            "point_count": frame_meta.get("point_count", 0),
-
-            "assumed_fps": frame_meta.get("assumed_fps", ASSUMED_FPS),
-            "realtime_frame_window": frame_meta.get(
-                "realtime_frame_window",
-                REALTIME_FRAME_WINDOW,
-            ),
-            "realtime_window_seconds": frame_meta.get(
-                "realtime_window_seconds",
-                REALTIME_WINDOW_SECONDS,
-            ),
-
-            "features": {
-                **feat,
-                "fall_prob": round(fall_prob, 4),
-                "fall_probability": round(fall_prob, 4),
-                "fall_risk_percent": fall_percent,
-                "speed_max": round(speed_max, 4),
-                "max_speed": round(speed_max, 4),
-                "height_drop": round(height_drop, 4),
-                "movement_after": round(movement_after, 4),
-                "movement_after_cm": round(movement_after * 100, 2),
-            },
-
-            "sensor_features": normalized.get(
-                "sensor_features",
-                build_sensor_feature_table(feat),
-            ),
-
-            "created_at": now_text(),
-        }
-    )
-
-    behavior = infer_behavior_case(file_name, normalized)
-    normalized.update(behavior)
-
-    return normalized
+        },
+    }
 
 
 # =========================================================
-# 모델 로딩
+# 바이탈 분석
+# 핵심 수정
+# - 전처리 완료 CSV(mean, std, peak_to_peak, zero_crossings, fft_mean, fft_max, fft_std) 우선 지원
+# - 원본 CSV(Time_Seconds, VitalSignal, Condition)도 들어오면 1초 chunk에서 자동 feature 추출
+# - 즉, 통합서비스에서는 feature CSV / 원본 CSV 둘 다 받을 수 있음
 # =========================================================
 
-def find_model_and_meta_paths(raise_if_missing: bool = True):
-    for model_path in MODEL_CANDIDATES:
-        if model_path.exists():
-            meta_path = model_path.with_name(f"{model_path.stem}_meta.json")
-            if meta_path.exists():
-                return model_path, meta_path
-            return model_path, None
+FEATURE_COLUMN_ALIASES = {
+    "mean": ["mean", "signal_mean", "vital_mean"],
+    "std": ["std", "signal_std", "vital_std"],
+    "peak_to_peak": ["peak_to_peak", "peak2peak", "p2p", "ptp", "range"],
+    "zero_crossings": ["zero_crossings", "zero_crossing", "zc"],
+    "fft_mean": ["fft_mean", "fft_avg"],
+    "fft_max": ["fft_max", "fft_peak"],
+    "fft_std": ["fft_std"],
+}
 
-    if raise_if_missing:
-        checked_paths = "\n".join(str(p) for p in MODEL_CANDIDATES)
-        raise FileNotFoundError(
-            "낙상 모델 파일을 찾을 수 없습니다.\n"
-            f"아래 경로 중 하나에 모델 파일이 있어야 합니다.\n\n{checked_paths}"
+
+def get_column_by_alias(df: pd.DataFrame, aliases):
+    if df is None or df.empty:
+        return None
+
+    lower_map = {
+        str(col).strip().lower(): col
+        for col in df.columns
+    }
+
+    for alias in aliases:
+        key = str(alias).strip().lower()
+        if key in lower_map:
+            return lower_map[key]
+
+    return None
+
+
+def extract_preprocessed_vital_matrix(chunk: pd.DataFrame):
+    """
+    전처리 완료 바이탈 CSV를 모델 입력 matrix로 변환.
+
+    허용 컬럼:
+    mean, std, peak_to_peak, zero_crossings, fft_mean, fft_max, fft_std
+
+    한 구간 안에 여러 행이 있으면 행 단위로 모두 모델에 넣고,
+    화면 표시용 features는 평균값을 사용한다.
+    """
+    if chunk is None or chunk.empty:
+        return None, None
+
+    selected_cols = []
+
+    for feature_name in VITAL_FEATURE_NAMES:
+        col = get_column_by_alias(
+            chunk,
+            FEATURE_COLUMN_ALIASES.get(feature_name, [feature_name]),
         )
 
-    return None, None
+        if col is None:
+            return None, None
+
+        selected_cols.append(col)
+
+    feature_df = chunk[selected_cols].copy()
+    feature_df.columns = VITAL_FEATURE_NAMES
+    feature_df = feature_df.apply(pd.to_numeric, errors="coerce")
+    feature_df = feature_df.dropna(how="all")
+
+    if feature_df.empty:
+        return None, None
+
+    feature_df = feature_df.fillna(0.0)
+    matrix = feature_df.to_numpy(dtype=float)
+
+    feature_mean = {
+        name: round(float(feature_df[name].mean()), 6)
+        for name in VITAL_FEATURE_NAMES
+    }
+
+    return matrix, feature_mean
 
 
-def load_model_and_meta():
-    global _cached_model
-    global _cached_meta
-    global _cached_model_path
+def extract_raw_vital_signal(chunk: pd.DataFrame):
+    signal_col = find_col(chunk, RAW_VITAL_SIGNAL_COLS)
 
-    model_path, meta_path = find_model_and_meta_paths(raise_if_missing=True)
+    if signal_col is None:
+        return None
 
-    if _cached_model is not None and _cached_model_path == str(model_path):
-        return _cached_model, _cached_meta
+    signal = pd.to_numeric(chunk[signal_col], errors="coerce").dropna()
 
-    model = joblib.load(model_path)
+    if signal.empty:
+        return None
 
-    meta = {}
-    if meta_path is not None and meta_path.exists():
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-
-    meta["_loaded_model_path"] = str(model_path)
-    meta["_loaded_meta_path"] = str(meta_path) if meta_path is not None else None
-
-    _cached_model = model
-    _cached_meta = meta
-    _cached_model_path = str(model_path)
-
-    print(f"[FALL MODEL] 모델 캐시 로드 완료: {model_path}")
-
-    return model, meta
+    return signal.to_numpy(dtype=float)
 
 
-def get_feature_names(model, meta: dict, feat: dict) -> list:
-    if meta and "feature_columns" in meta:
-        return list(meta["feature_columns"])
+def get_raw_vital_time_info(chunk: pd.DataFrame):
+    time_col = find_col(chunk, RAW_VITAL_TIME_COLS)
 
-    if meta and "feature_names" in meta:
-        return list(meta["feature_names"])
+    if time_col is None:
+        second_col = find_col(chunk, ["second", "seconds", "sec", "time_sec", "time_seconds"])
 
-    if hasattr(model, "feature_columns_"):
-        return list(model.feature_columns_)
+        if second_col is not None:
+            seconds = pd.to_numeric(chunk[second_col], errors="coerce").dropna()
 
-    if hasattr(model, "feature_names_in_"):
-        return list(model.feature_names_in_)
-
-    return sorted(feat.keys())
-
-
-def get_model_threshold(model, meta: dict) -> float:
-    if meta and "best_threshold" in meta:
-        return float(meta["best_threshold"])
-
-    if meta and "threshold" in meta:
-        return float(meta["threshold"])
-
-    if hasattr(model, "threshold_"):
-        return float(model.threshold_)
-
-    return ALERT_THRESHOLD
-
-
-def predict_single_csv(
-    csv_path: Path,
-    file_name: str,
-    model,
-    meta: dict,
-    frame_meta_override: dict | None = None,
-) -> dict:
-    frame_meta = frame_meta_override or get_csv_frame_meta(csv_path)
-
-    feat = extract_features_from_csv(csv_path)
-
-    if not isinstance(feat, dict):
-        raise ValueError("feature_extractor 결과가 dict 형태가 아닙니다.")
-
-    feature_names = get_feature_names(model, meta, feat)
-
-    X = pd.DataFrame([feat])
-
-    for col in feature_names:
-        if col not in X.columns:
-            X[col] = 0.0
-
-    X = X[feature_names]
-    X = X.apply(pd.to_numeric, errors="coerce").fillna(0.0)
-
-    fall_prob, pred_label = get_fall_probability(model, X)
-
-    model_threshold = get_model_threshold(model, meta)
-    threshold_pred_label = "Fall" if float(fall_prob) >= ALERT_THRESHOLD else "Normal"
-
-    post_result = postprocess_fall_result(
-        fall_prob=fall_prob,
-        features=feat,
-        file_name=file_name,
-    )
-
-    result = build_normalized_frontend_result(
-        result=post_result,
-        feat=feat,
-        fall_prob=fall_prob,
-        pred_label=pred_label,
-        model_threshold=model_threshold,
-        threshold_pred_label=threshold_pred_label,
-        file_name=file_name,
-        meta=meta,
-        frame_meta=frame_meta,
-    )
-
-    return result
-
-
-def build_aggregate_result(file_name: str, window_results: list[dict]) -> dict:
-    if not window_results:
-        raise ValueError("집계할 window 결과가 없습니다.")
-
-    best = max(
-        window_results,
-        key=lambda item: (
-            to_float(item.get("fall_prob")),
-            1 if item.get("status") == "Fall Alert" else 0,
-        ),
-    )
-
-    final_status = "Fall Alert" if to_float(best.get("fall_prob")) >= ALERT_THRESHOLD else "Normal"
-    final_alert = final_status == "Fall Alert"
-
-    final_result = dict(best)
-
-    final_result.update(
-        {
-            "status": final_status,
-            "alert": final_alert,
-            "file_name": file_name,
-            "filename": file_name,
-            "source_mode": "10frame_aggregate",
-            "window_count": len(window_results),
-            "detected_window": {
-                "chunk_index": best.get("chunk_index"),
-                "frame_start": best.get("frame_start"),
-                "frame_end": best.get("frame_end"),
-                "fall_risk_percent": best.get("fall_risk_percent"),
-                "status": final_status,
-            },
-            "window_results": [
-                {
-                    "chunk_index": item.get("chunk_index"),
-                    "frame_start": item.get("frame_start"),
-                    "frame_end": item.get("frame_end"),
-                    "frame_count": item.get("frame_count"),
-                    "point_count": item.get("point_count"),
-                    "status": item.get("status"),
-                    "alert": item.get("alert"),
-                    "fall_prob": item.get("fall_prob"),
-                    "fall_probability": item.get("fall_probability"),
-                    "raw_model_fall_prob": item.get("raw_model_fall_prob"),
-                    "fall_risk_percent": item.get("fall_risk_percent"),
-                    "risk_score": item.get("risk_score"),
-                    "speed_max": item.get("speed_max"),
-                    "height_drop": item.get("height_drop"),
-                    "movement_after": item.get("movement_after"),
+            if not seconds.empty:
+                return {
+                    "time_start": round(float(seconds.min()), 3),
+                    "time_end": round(float(seconds.max()), 3),
+                    "sample_count": int(len(seconds)),
                 }
-                for item in window_results
-            ],
+
+        return {
+            "time_start": None,
+            "time_end": None,
+            "sample_count": int(len(chunk)),
         }
+
+    times = pd.to_numeric(chunk[time_col], errors="coerce").dropna()
+
+    if times.empty:
+        return {
+            "time_start": None,
+            "time_end": None,
+            "sample_count": int(len(chunk)),
+        }
+
+    return {
+        "time_start": round(float(times.min()), 3),
+        "time_end": round(float(times.max()), 3),
+        "sample_count": int(len(times)),
+    }
+
+
+def compute_raw_vital_features(signal):
+    if signal is None or len(signal) == 0:
+        return {
+            name: 0.0
+            for name in VITAL_FEATURE_NAMES
+        }
+
+    signal = np.asarray(signal, dtype=float)
+    signal = signal[~np.isnan(signal)]
+
+    if len(signal) == 0:
+        return {
+            name: 0.0
+            for name in VITAL_FEATURE_NAMES
+        }
+
+    mean = float(np.mean(signal))
+    std = float(np.std(signal))
+    peak_to_peak = float(np.max(signal) - np.min(signal))
+
+    if len(signal) >= 2:
+        signs = np.sign(signal)
+        zero_crossings = int(np.sum(np.diff(signs) != 0))
+    else:
+        zero_crossings = 0
+
+    if len(signal) >= 2:
+        fft_values = np.abs(np.fft.rfft(signal))
+        fft_mean = float(np.mean(fft_values))
+        fft_max = float(np.max(fft_values))
+        fft_std = float(np.std(fft_values))
+    else:
+        fft_mean = 0.0
+        fft_max = 0.0
+        fft_std = 0.0
+
+    return {
+        "mean": round(mean, 6),
+        "std": round(std, 6),
+        "peak_to_peak": round(peak_to_peak, 6),
+        "zero_crossings": round(float(zero_crossings), 6),
+        "fft_mean": round(fft_mean, 6),
+        "fft_max": round(fft_max, 6),
+        "fft_std": round(fft_std, 6),
+    }
+
+
+def feature_dict_to_matrix(features: dict):
+    return np.array(
+        [[float(features.get(name, 0.0)) for name in VITAL_FEATURE_NAMES]],
+        dtype=float,
     )
 
-    if final_status == "Fall Alert":
-        final_result["message"] = (
-            "전체 CSV를 10프레임 단위로 분석한 결과, "
-            f"가장 위험한 구간은 frame {best.get('frame_start')} ~ {best.get('frame_end')}이며 "
-            f"위험도는 {round(to_float(best.get('fall_prob')) * 100)}%입니다."
-        )
+
+def matrix_to_feature_mean(matrix):
+    if matrix is None or len(matrix) == 0:
+        return {
+            name: 0.0
+            for name in VITAL_FEATURE_NAMES
+        }
+
+    arr = np.asarray(matrix, dtype=float)
+
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+
+    means = np.mean(arr, axis=0)
+
+    return {
+        name: round(float(means[index]), 6)
+        for index, name in enumerate(VITAL_FEATURE_NAMES)
+    }
+
+
+def get_vital_condition(chunk: pd.DataFrame):
+    return text_value(
+        chunk,
+        RAW_VITAL_CONDITION_COLS,
+        default="-",
+    )
+
+
+def fallback_vital_result_from_features(
+    chunk: pd.DataFrame,
+    features: dict,
+    reason_prefix: str,
+    model_mode: str,
+):
+    """
+    AutoEncoder 모델이 없거나 실패했을 때 사용하는 rule-based fallback.
+    원본/전처리 CSV 모두 같은 features 기준으로 판단한다.
+    """
+    condition = get_vital_condition(chunk)
+    condition_text = str(condition or "").lower()
+
+    peak_to_peak = float(features.get("peak_to_peak", 0))
+    std = float(features.get("std", 0))
+    fft_max = float(features.get("fft_max", 0))
+
+    if "apnea" in condition_text or "무호흡" in condition_text:
+        state = "호흡 이상"
+        level = "warning"
+        risk_score = 72
+        reason = "Condition 값이 Apnea로 표시되어 호흡 이상 가능성이 있습니다."
+
+    elif "normal" in condition_text or "정상" in condition_text:
+        state = "정상"
+        level = "normal"
+        risk_score = 18
+        reason = "Condition 값이 Normal이며 바이탈 신호가 정상 참고 상태입니다."
+
+    elif peak_to_peak >= 2.0 or std >= 0.8:
+        state = "주의"
+        level = "warning"
+        risk_score = 60
+        reason = "바이탈 신호의 진폭 변화가 크게 나타났습니다."
+
+    elif fft_max >= 50:
+        state = "주의"
+        level = "warning"
+        risk_score = 55
+        reason = "주파수 성분의 최대값이 높게 나타났습니다."
+
     else:
-        final_result["message"] = (
-            "전체 CSV를 10프레임 단위로 분석했지만 Fall Alert 기준에 도달한 구간이 없습니다."
+        state = "정상"
+        level = "normal"
+        risk_score = 18
+        reason = "바이탈 신호가 현재 기준에서 큰 이상을 보이지 않습니다."
+
+    time_info = get_raw_vital_time_info(chunk)
+
+    return {
+        "module": "vital",
+        "title": "바이탈",
+        "state": state,
+        "level": level,
+        "risk_score": risk_score,
+        "reason": f"{reason_prefix} {reason}".strip(),
+        "status": level.capitalize(),
+        "model_mode": model_mode,
+        "condition": condition,
+        "time_start": time_info["time_start"],
+        "time_end": time_info["time_end"],
+        "sample_count": time_info["sample_count"],
+        "error_mean": 0,
+        "error_max": 0,
+        "error_min": 0,
+        "threshold": 0,
+        "error_ratio": 0,
+        "anomaly_ratio": 0,
+        "is_anomaly": level in ["danger", "warning"],
+        "features": features,
+    }
+
+
+def vital_status_to_level(status: str):
+    text = str(status or "").lower()
+
+    if text == "danger" or "위험" in text:
+        return "danger"
+
+    if text == "warning" or "주의" in text:
+        return "warning"
+
+    if text == "normal" or "정상" in text:
+        return "normal"
+
+    return "idle"
+
+
+def predict_vital_with_autoencoder(
+    chunk: pd.DataFrame,
+    feature_matrix: np.ndarray,
+    feature_mean: dict,
+    model_mode: str,
+    default_reason: str,
+):
+    condition = get_vital_condition(chunk)
+    time_info = get_raw_vital_time_info(chunk)
+
+    if vital_module is None:
+        return fallback_vital_result_from_features(
+            chunk,
+            feature_mean,
+            f"vital_signal.py import 실패: {VITAL_MODULE_IMPORT_ERROR}.",
+            f"{model_mode}_fallback",
         )
 
-    behavior = infer_behavior_case(file_name, final_result, window_results)
-    final_result.update(behavior)
-
-    return final_result
-
-
-# =========================================================
-# MongoDB
-# =========================================================
-
-def save_event_to_mongodb(event: dict) -> dict:
-    if event.get("status") != "Fall Alert":
-        return {
-            "db_saved": False,
-            "db_message": "Fall Alert가 아니므로 MongoDB에 저장하지 않습니다.",
-        }
-
-    if events_collection is None:
-        return {
-            "db_saved": False,
-            "db_message": "MongoDB가 연결되지 않아 저장하지 못했습니다.",
-        }
+    if not hasattr(vital_module, "check_model_ready") or not vital_module.check_model_ready():
+        return fallback_vital_result_from_features(
+            chunk,
+            feature_mean,
+            "생체신호 AutoEncoder 모델이 로드되지 않아 feature 기준으로 판정합니다.",
+            f"{model_mode}_fallback",
+        )
 
     try:
-        insert_data = dict(event)
-        insert_data["created_at_dt"] = datetime.now()
+        window_errors = vital_module.predict_errors(feature_matrix)
 
-        result = events_collection.insert_one(insert_data)
+        segment = vital_module.make_segment_result(
+            segment_index=0,
+            window_matrix=feature_matrix,
+            window_errors=window_errors,
+        )
+
+        status = segment.get("status", "Normal")
+        state = segment.get("state", "정상")
+        level = vital_status_to_level(status)
 
         return {
-            "db_saved": True,
-            "event_id": str(result.inserted_id),
-            "db_message": "낙상 알림 이벤트가 MongoDB에 저장되었습니다.",
+            "module": "vital",
+            "title": "바이탈",
+            "state": state,
+            "level": level,
+            "risk_score": segment.get("risk_score", 0),
+            "reason": segment.get("message", default_reason),
+            "status": status,
+            "model_mode": model_mode,
+            "condition": condition,
+            "time_start": time_info["time_start"],
+            "time_end": time_info["time_end"],
+            "sample_count": time_info["sample_count"],
+            "error_mean": segment.get("error_mean", 0),
+            "error_max": segment.get("error_max", 0),
+            "error_min": segment.get("error_min", 0),
+            "threshold": segment.get("threshold", 0),
+            "error_ratio": segment.get("error_ratio", 0),
+            "anomaly_ratio": segment.get("anomaly_ratio", 0),
+            "is_anomaly": segment.get("is_anomaly", False),
+            "current_segment_count": segment.get("current_segment_count", 0),
+            "max_segment_count": segment.get("max_segment_count", 0),
+            "required_continuous_segments": segment.get("required_continuous_segments", 0),
+            "features": segment.get("features", feature_mean),
         }
 
     except Exception as e:
+        traceback.print_exc()
+
+        return fallback_vital_result_from_features(
+            chunk,
+            feature_mean,
+            f"AutoEncoder 분석 중 오류가 발생해 feature 기준으로 판정합니다: {e}.",
+            f"{model_mode}_fallback",
+        )
+
+
+def predict_vital_chunk(chunk: pd.DataFrame):
+    if chunk.empty:
         return {
-            "db_saved": False,
-            "db_message": f"MongoDB 저장 실패: {e}",
+            "module": "vital",
+            "title": "바이탈",
+            "state": "대기",
+            "level": "idle",
+            "risk_score": 0,
+            "reason": "해당 구간의 바이탈 데이터가 없습니다.",
+            "status": "Idle",
+            "model_mode": "waiting",
+            "condition": "-",
+            "time_start": None,
+            "time_end": None,
+            "sample_count": 0,
+            "error_mean": 0,
+            "error_max": 0,
+            "error_min": 0,
+            "threshold": 0,
+            "error_ratio": 0,
+            "anomaly_ratio": 0,
+            "is_anomaly": False,
+            "features": {
+                name: 0.0
+                for name in VITAL_FEATURE_NAMES
+            },
         }
 
+    # 1순위: 전처리 완료 feature CSV
+    # mean, std, peak_to_peak, zero_crossings, fft_mean, fft_max, fft_std 컬럼이 있으면
+    # 원본 신호로 다시 전처리하지 않고 그대로 모델 입력으로 사용한다.
+    feature_matrix, feature_mean = extract_preprocessed_vital_matrix(chunk)
 
-def serialize_mongo_doc(doc: dict) -> dict:
-    doc = dict(doc)
-    doc["_id"] = str(doc["_id"])
+    if feature_matrix is not None:
+        return predict_vital_with_autoencoder(
+            chunk=chunk,
+            feature_matrix=feature_matrix,
+            feature_mean=feature_mean,
+            model_mode="feature_csv_autoencoder",
+            default_reason="전처리 완료 바이탈 feature CSV를 AutoEncoder로 분석했습니다.",
+        )
 
-    if "created_at_dt" in doc and hasattr(doc["created_at_dt"], "strftime"):
-        doc["created_at_dt"] = doc["created_at_dt"].strftime("%Y-%m-%d %H:%M:%S")
+    # 2순위: 원본 VitalSignal CSV
+    # Time_Seconds, VitalSignal, Condition 형식이면 현재 1초 chunk에서 feature를 계산한다.
+    signal = extract_raw_vital_signal(chunk)
 
-    return doc
+    if signal is not None:
+        raw_features = compute_raw_vital_features(signal)
+        raw_matrix = feature_dict_to_matrix(raw_features)
+
+        return predict_vital_with_autoencoder(
+            chunk=chunk,
+            feature_matrix=raw_matrix,
+            feature_mean=raw_features,
+            model_mode="raw_signal_autoencoder",
+            default_reason="VitalSignal 원시 신호를 1초 단위 feature로 변환한 뒤 AutoEncoder로 분석했습니다.",
+        )
+
+    # 둘 다 없으면 바이탈 분석 불가
+    empty_features = {
+        name: 0.0
+        for name in VITAL_FEATURE_NAMES
+    }
+
+    return {
+        "module": "vital",
+        "title": "바이탈",
+        "state": "신호 없음",
+        "level": "idle",
+        "risk_score": 0,
+        "reason": (
+            "바이탈 CSV에 전처리 feature 컬럼"
+            "(mean, std, peak_to_peak, zero_crossings, fft_mean, fft_max, fft_std)"
+            " 또는 원본 VitalSignal 컬럼이 없습니다."
+        ),
+        "status": "NoSignal",
+        "model_mode": "no_vital_feature_or_signal",
+        "condition": get_vital_condition(chunk),
+        "time_start": None,
+        "time_end": None,
+        "sample_count": 0,
+        "error_mean": 0,
+        "error_max": 0,
+        "error_min": 0,
+        "threshold": 0,
+        "error_ratio": 0,
+        "anomaly_ratio": 0,
+        "is_anomaly": False,
+        "features": empty_features,
+    }
 
 
 # =========================================================
-# Startup / Shutdown
+# 종합 / 최종 결론 / 저장
 # =========================================================
 
-def startup_fall_dashboard():
-    global mongo_client
-    global events_collection
+def make_current_overall(fall_result, abnormal_result, vital_result):
+    # 바이탈은 통합 화면에서 작은 참고 정보로만 표시하고,
+    # 종합 위험도/실시간 알림 판단에는 반영하지 않는다.
+    results = [fall_result, abnormal_result]
 
-    if MongoClient is None:
-        mongo_client = None
-        events_collection = None
-        print("[MongoDB] pymongo가 설치되지 않았습니다. 저장 없이 예측만 동작합니다.")
+    if any(item["level"] == "danger" for item in results):
+        level = "danger"
+        label = "위험"
+        message = "현재 구간에서 즉시 확인이 필요한 위험 상황입니다."
+    elif any(item["level"] == "warning" for item in results):
+        level = "warning"
+        label = "주의"
+        message = "현재 구간에서 주의 상태가 감지되었습니다."
+    elif any(item["level"] == "normal" for item in results):
+        level = "normal"
+        label = "정상"
+        message = "현재 구간은 정상 범위입니다."
     else:
+        level = "idle"
+        label = "대기"
+        message = "CSV를 업로드하고 통합 재생을 시작하세요."
+
+    risk_score = max(item.get("risk_score", 0) for item in results)
+
+    return {
+        "level": level,
+        "label": label,
+        "risk_score": risk_score,
+        "message": message,
+    }
+
+
+def make_final_summary(history):
+    if not history:
+        return {
+            "level": "idle",
+            "label": "대기",
+            "risk_score": 0,
+            "message": "아직 실행된 결과가 없습니다.",
+            "fall_detected": False,
+            "fall_second": None,
+            "fall_action": "-",
+            "fall_direction": "-",
+            "fall_cause": "-",
+            "cause_guess": "-",
+            "abnormal_detected": False,
+            "abnormal_type": "-",
+            "vital_detected": False,
+            "saved": False,
+        }
+
+    ordered = sorted(history, key=lambda x: x.get("second", 0))
+
+    fall_events = [
+        item for item in ordered
+        if item.get("fall", {}).get("level") == "danger"
+    ]
+
+    abnormal_events = [
+        item for item in ordered
+        if item.get("abnormal", {}).get("level") in ["danger", "warning"]
+    ]
+
+    vital_events = [
+        item for item in ordered
+        if item.get("vital", {}).get("level") in ["danger", "warning"]
+    ]
+
+    max_risk = max(
+        int(item.get("overall", {}).get("risk_score", 0))
+        for item in ordered
+    )
+
+    if fall_events:
+        best_fall = max(
+            fall_events,
+            key=lambda x: x.get("fall", {}).get("risk_score", 0),
+        )
+
+        fall = best_fall["fall"]
+        fall_score = int(fall.get("risk_score", 0))
+
+        return {
+            "level": "danger",
+            "label": "낙상 발생",
+            "risk_score": fall_score,
+            "message": f"{best_fall.get('second')}초 구간에서 낙상이 감지되었습니다.",
+            "fall_detected": True,
+            "fall_second": best_fall.get("second"),
+            "fall_action": fall.get("fall_action", "-"),
+            "fall_direction": fall.get("fall_direction", "-"),
+            "fall_cause": fall.get("fall_cause", "-"),
+            "cause_guess": fall.get("cause_guess", "-"),
+            "abnormal_detected": len(abnormal_events) > 0,
+            "abnormal_type": abnormal_events[0]["abnormal"].get("abnormal_type", "-") if abnormal_events else "-",
+            "vital_detected": len(vital_events) > 0,
+            "saved": True,
+        }
+
+    if abnormal_events:
+        first_abnormal = abnormal_events[0]
+        abnormal = first_abnormal["abnormal"]
+
+        return {
+            "level": "warning",
+            "label": "이상행동 감지",
+            "risk_score": abnormal.get("risk_score", max_risk),
+            "message": f"{first_abnormal.get('second')}초 구간에서 이상행동이 감지되었습니다.",
+            "fall_detected": False,
+            "fall_second": None,
+            "fall_action": "-",
+            "fall_direction": "-",
+            "fall_cause": "-",
+            "cause_guess": "-",
+            "abnormal_detected": True,
+            "abnormal_type": abnormal.get("abnormal_type", "-"),
+            "vital_detected": len(vital_events) > 0,
+            "saved": True,
+        }
+
+    # 바이탈 이벤트는 작은 참고 정보로만 사용하므로
+    # 최종 종합 결론을 "바이탈 주의"로 바꾸거나 DB 저장 대상으로 만들지 않는다.
+    return {
+        "level": "normal",
+        "label": "정상",
+        "risk_score": max_risk,
+        "message": "전체 구간에서 낙상 또는 위험 이벤트가 감지되지 않았습니다.",
+        "fall_detected": False,
+        "fall_second": None,
+        "fall_action": "-",
+        "fall_direction": "-",
+        "fall_cause": "-",
+        "cause_guess": "-",
+        "abnormal_detected": False,
+        "abnormal_type": "-",
+        "vital_detected": False,
+        "saved": False,
+    }
+
+
+def should_save_event(result, final_summary=None):
+    if result.get("fall", {}).get("level") == "danger":
+        return True
+
+    if result.get("abnormal", {}).get("risk_score", 0) >= 70:
+        return True
+
+    # 바이탈은 DB 저장 대상에서 제외한다. 낙상/이상행동만 저장한다.
+    if final_summary and final_summary.get("level") in ["danger", "warning"]:
+        return True
+
+    return False
+
+
+def save_event_to_db(event_type, payload):
+    saved_payload = json_safe({
+        "event_type": event_type,
+        "saved_at": now_iso(),
+        **payload,
+    })
+
+    saved_id = None
+    db_status = "memory"
+
+    if mongo_collection is not None:
         try:
-            mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=1000)
-            mongo_client.admin.command("ping")
-
-            db = mongo_client[MONGO_DB_NAME]
-            events_collection = db[MONGO_COLLECTION_NAME]
-
-            events_collection.create_index([("created_at_dt", DESCENDING)])
-            events_collection.create_index([("created_at", DESCENDING)])
-            events_collection.create_index([("status", 1)])
-            events_collection.create_index([("alert", 1)])
-            events_collection.create_index([("file_name", 1)])
-
-            print(f"[MongoDB] 연결 성공: {MONGO_DB_NAME}.{MONGO_COLLECTION_NAME}")
-
+            result = mongo_collection.insert_one(saved_payload)
+            saved_id = str(result.inserted_id)
+            db_status = "mongodb"
         except Exception as e:
-            mongo_client = None
-            events_collection = None
-            print(f"[MongoDB] 연결 실패: {e}")
-            print("[MongoDB] 저장 기능 없이 낙상 예측 API만 동작합니다.")
+            saved_payload["db_error"] = str(e)
+            db_status = "memory"
 
-    model_path, meta_path = find_model_and_meta_paths(raise_if_missing=False)
+    memory_payload = {
+        **saved_payload,
+        "_id": saved_id or str(uuid4()),
+        "db_status": db_status,
+    }
 
-    if model_path is not None:
-        print(f"[FALL MODEL] 사용 모델: {model_path}")
-    else:
-        print("[FALL MODEL] 사용 가능한 낙상 모델 파일을 찾지 못했습니다.")
+    SAVED_LOGS.insert(0, memory_payload)
 
-    if meta_path is not None:
-        print(f"[FALL MODEL] 메타 파일: {meta_path}")
-    else:
-        print("[FALL MODEL] 메타 파일 없음")
+    if len(SAVED_LOGS) > 200:
+        del SAVED_LOGS[200:]
+
+    return {
+        "saved": True,
+        "db_status": db_status,
+        "id": memory_payload["_id"],
+    }
 
 
-def shutdown_fall_dashboard():
-    global mongo_client
+def session_status(session_id: str):
+    session = SESSIONS.get(session_id)
 
-    if mongo_client is not None:
-        mongo_client.close()
-        print("[MongoDB] 연결 종료")
+    if not session:
+        raise HTTPException(status_code=404, detail="통합 시뮬레이션 세션을 찾을 수 없습니다.")
+
+    current_step = session["cursor"]
+    fps = session["fps"]
+    window_frames = session["fall_window_frames"]
+
+    current_seconds = round((current_step * window_frames) / fps, 2)
+    total_seconds = round((session["total_steps"] * window_frames) / fps, 2)
+
+    return {
+        "session_id": session_id,
+        "fps": fps,
+        "fall_window_frames": window_frames,
+        "vital_sample_interval_seconds": VITAL_SAMPLE_INTERVAL_SECONDS,
+        "current_step": current_step,
+        "total_steps": session["total_steps"],
+        "current_seconds": current_seconds,
+        "total_seconds": total_seconds,
+        "done": session["cursor"] >= session["total_steps"],
+        "files": session["files"],
+        "created_at": session["created_at"],
+    }
 
 
 # =========================================================
 # API
 # =========================================================
 
-@router.get("/fall/health")
+@router.get("/health")
 def health():
-    model_path, meta_path = find_model_and_meta_paths(raise_if_missing=False)
+    vital_ready = False
+
+    if vital_module is not None and hasattr(vital_module, "check_model_ready"):
+        try:
+            vital_ready = vital_module.check_model_ready()
+        except Exception:
+            vital_ready = False
 
     return {
         "status": "ok",
-        "api": "fall-running",
-        "message": "FallDashboard API is running",
-
-        "fps": ASSUMED_FPS,
-        "realtime_frame_window": REALTIME_FRAME_WINDOW,
-        "realtime_window_seconds": REALTIME_WINDOW_SECONDS,
-        "display_alert_threshold": ALERT_THRESHOLD,
-
-        "rf_dir_exists": RF_DIR.exists(),
-        "model_exists": model_path is not None,
-        "meta_exists": meta_path is not None,
-        "mongo_connected": events_collection is not None,
-
-        "model_path": str(model_path) if model_path is not None else None,
-        "meta_path": str(meta_path) if meta_path is not None else None,
-
-        "root_dir": str(ROOT_DIR),
-        "backend_dir": str(BACKEND_DIR),
-        "rf_dir": str(RF_DIR),
-        "model_dir": str(MODEL_DIR),
+        "service": "integrated-dashboard",
+        "time": now_iso(),
+        "db_connected": mongo_collection is not None,
+        "db_error": mongo_error,
+        "vital_module_loaded": vital_module is not None,
+        "vital_module_import_error": VITAL_MODULE_IMPORT_ERROR,
+        "vital_model_ready": vital_ready,
+        "vital_sample_interval_seconds": VITAL_SAMPLE_INTERVAL_SECONDS,
+        "raw_vital_columns": {
+            "time": RAW_VITAL_TIME_COLS,
+            "signal": RAW_VITAL_SIGNAL_COLS,
+            "condition": RAW_VITAL_CONDITION_COLS,
+        },
+        "vital_feature_names": VITAL_FEATURE_NAMES,
     }
 
 
-@router.post("/predict")
-async def predict(
-    file: UploadFile = File(...),
-    save_event: bool = Query(True),
+@router.post("/simulation/upload")
+async def upload_integrated_csv(
+    fall_csv: Optional[UploadFile] = File(None),
+    abnormal_csv: Optional[UploadFile] = File(None),
+    vital_csv: Optional[UploadFile] = File(None),
+    fps: int = Form(DEFAULT_FPS),
+    fall_window_frames: int = Form(DEFAULT_FALL_WINDOW_FRAMES),
 ):
-    file_name = file.filename or "uploaded.csv"
+    if not fall_csv and not abnormal_csv and not vital_csv:
+        raise HTTPException(status_code=400, detail="최소 1개 이상의 CSV 파일을 업로드해야 합니다.")
 
-    if not file_name.lower().endswith(".csv"):
-        return {
-            "status": "Error",
-            "alert": False,
-            "message": "CSV 파일만 업로드할 수 있습니다.",
-            "db_saved": False,
-            "file_name": file_name,
-            "filename": file_name,
-            "fall_prob": 0.0,
-            "fall_probability": 0.0,
-            "fall_risk_percent": 0.0,
-            "risk_score": 0.0,
-            "speed_max": 0.0,
-            "height_drop": 0.0,
-            "movement_after": 0.0,
-            "created_at": now_text(),
-        }
+    if fps <= 0:
+        raise HTTPException(status_code=400, detail="fps는 1 이상이어야 합니다.")
 
-    tmp_path = None
-    chunk_paths = []
+    if fall_window_frames <= 0:
+        raise HTTPException(status_code=400, detail="fall_window_frames는 1 이상이어야 합니다.")
 
-    try:
-        model, meta = load_model_and_meta()
+    fall_df = await read_upload_file(fall_csv) if fall_csv else None
+    abnormal_df = await read_upload_file(abnormal_csv) if abnormal_csv else None
+    vital_df = await read_upload_file(vital_csv) if vital_csv else None
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-            shutil.copyfileobj(file.file, tmp)
-            tmp_path = Path(tmp.name)
-
-        chunks = split_csv_by_frame_window(tmp_path, REALTIME_FRAME_WINDOW)
-        chunk_paths = [item["tmp_path"] for item in chunks]
-
-        if not chunks:
-            raise ValueError("CSV를 10프레임 단위로 나눌 수 없습니다.")
-
-        window_results = []
-
-        for chunk in chunks:
-            frame_meta = {
-                "frame_start": chunk["frame_start"],
-                "frame_end": chunk["frame_end"],
-                "frame_count": chunk["frame_count"],
-                "point_count": chunk["point_count"],
-                "assumed_fps": ASSUMED_FPS,
-                "realtime_frame_window": REALTIME_FRAME_WINDOW,
-                "realtime_window_seconds": REALTIME_WINDOW_SECONDS,
-            }
-
-            chunk_result = predict_single_csv(
-                csv_path=chunk["tmp_path"],
-                file_name=file_name,
-                model=model,
-                meta=meta,
-                frame_meta_override=frame_meta,
-            )
-
-            chunk_result["chunk_index"] = chunk["chunk_index"]
-            window_results.append(chunk_result)
-
-        result = build_aggregate_result(file_name, window_results)
-
-        if save_event:
-            db_result = save_event_to_mongodb(result)
-        else:
-            db_result = {
-                "db_saved": False,
-                "db_message": "실시간 구간 분석 중에는 DB에 저장하지 않습니다. 최종 결과만 저장합니다.",
-            }
-
-        result.update(db_result)
-
-        return result
-
-    except Exception as e:
-        print("[FALL PREDICT ERROR]", e)
-
-        return {
-            "status": "Error",
-            "alert": False,
-            "message": f"예측 처리 중 오류가 발생했습니다: {e}",
-            "db_saved": False,
-            "file_name": file_name,
-            "filename": file_name,
-
-            "fall_prob": 0.0,
-            "fall_probability": 0.0,
-            "raw_model_fall_prob": 0.0,
-            "fall_risk": 0.0,
-            "fall_risk_percent": 0.0,
-            "risk_score": 0.0,
-
-            "speed_max": 0.0,
-            "max_speed": 0.0,
-            "height_drop": 0.0,
-            "movement_after": 0.0,
-            "movement_after_cm": 0.0,
-
-            "frame_start": 0,
-            "frame_end": 0,
-            "frame_count": 0,
-            "point_count": 0,
-
-            "action_case": "unknown",
-            "action_label": "분석 실패",
-            "behavior_pattern": "예측 처리 중 오류가 발생하여 행동 패턴을 분석하지 못했습니다.",
-            "likely_cause": "CSV 형식, 모델 파일, feature_extractor를 확인해야 합니다.",
-            "risk_reason": [str(e)],
-            "recommendations": ["백엔드 로그와 CSV 컬럼명을 확인하세요."],
-
-            "created_at": now_text(),
-        }
-
-    finally:
-        if tmp_path is not None:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-        for path in chunk_paths:
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-
-@router.get("/events")
-def get_events(limit: int = 30):
-    if events_collection is None:
-        return {
-            "mongo_connected": False,
-            "events": [],
-            "count": 0,
-            "message": "MongoDB가 연결되지 않았습니다.",
-        }
-
-    limit = max(1, min(limit, 100))
-
-    docs = (
-        events_collection.find({"status": "Fall Alert"})
-        .sort("created_at_dt", DESCENDING)
-        .limit(limit)
+    total_steps = total_steps_by_window(
+        fall_df=fall_df,
+        abnormal_df=abnormal_df,
+        vital_df=vital_df,
+        fps=fps,
+        window_frames=fall_window_frames,
     )
 
-    events = [serialize_mongo_doc(doc) for doc in docs]
+    session_id = str(uuid4())
+
+    SESSIONS[session_id] = {
+        "fps": fps,
+        "fall_window_frames": fall_window_frames,
+        "cursor": 0,
+        "total_steps": total_steps,
+        "created_at": now_iso(),
+        "data": {
+            "fall": fall_df,
+            "abnormal": abnormal_df,
+            "vital": vital_df,
+        },
+        "files": {
+            "fall": fall_csv.filename if fall_csv else None,
+            "abnormal": abnormal_csv.filename if abnormal_csv else None,
+            "vital": vital_csv.filename if vital_csv else None,
+        },
+        "history": [],
+        "saved_event_keys": set(),
+        "final_saved": False,
+        "fall_confirmed": False,
+    }
 
     return {
-        "mongo_connected": True,
-        "events": events,
-        "count": len(events),
+        "message": "통합 CSV 업로드가 완료되었습니다.",
+        "status": session_status(session_id),
+        "history": [],
+        "final_summary": make_final_summary([]),
     }
 
 
-@router.get("/stats")
-def get_stats():
-    if events_collection is None:
+@router.get("/simulation/{session_id}/status")
+def get_status(session_id: str):
+    session = SESSIONS.get(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="통합 시뮬레이션 세션을 찾을 수 없습니다.")
+
+    return {
+        "status": session_status(session_id),
+        "history": session["history"][:120],
+        "final_summary": make_final_summary(session["history"]),
+    }
+
+
+@router.post("/simulation/{session_id}/reset")
+def reset_session(session_id: str):
+    session = SESSIONS.get(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="통합 시뮬레이션 세션을 찾을 수 없습니다.")
+
+    session["cursor"] = 0
+    session["history"] = []
+    session["saved_event_keys"] = set()
+    session["final_saved"] = False
+    session["fall_confirmed"] = False
+
+    return {
+        "message": "통합 시뮬레이션이 초기화되었습니다.",
+        "status": session_status(session_id),
+        "history": [],
+        "final_summary": make_final_summary([]),
+    }
+
+
+@router.get("/simulation/{session_id}/next")
+def next_step(session_id: str):
+    session = SESSIONS.get(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="통합 시뮬레이션 세션을 찾을 수 없습니다.")
+
+    cursor = session["cursor"]
+    total_steps = session["total_steps"]
+    fps = session["fps"]
+    window_frames = session["fall_window_frames"]
+
+    if cursor >= total_steps:
+        final_summary = make_final_summary(session["history"])
+
+        if should_save_event({}, final_summary) and not session["final_saved"]:
+            save_event_to_db(
+                "integrated_final_summary",
+                {
+                    "session_id": session_id,
+                    "final_summary": final_summary,
+                    "status": session_status(session_id),
+                },
+            )
+            session["final_saved"] = True
+
         return {
-            "mongo_connected": False,
-            "total_events": 0,
-            "fall_alert_count": 0,
-            "exception_count": 0,
-            "message": "MongoDB가 연결되지 않았습니다.",
+            "done": True,
+            "status": session_status(session_id),
+            "history": session["history"][:120],
+            "final_summary": final_summary,
+            "message": "시뮬레이션이 종료되었습니다.",
         }
 
-    fall_alert_count = events_collection.count_documents({"status": "Fall Alert"})
+    fall_df = session["data"]["fall"]
+    abnormal_df = session["data"]["abnormal"]
+    vital_df = session["data"]["vital"]
+
+    fall_chunk = slice_by_frame_window(fall_df, cursor, fps, window_frames, "fall")
+    abnormal_chunk = slice_by_frame_window(abnormal_df, cursor, fps, window_frames, "abnormal")
+    vital_chunk = slice_by_frame_window(vital_df, cursor, fps, window_frames, "vital")
+
+    current_seconds = round((cursor * window_frames) / fps, 2)
+
+    fall_result = predict_fall_chunk(
+        fall_chunk,
+        fall_already_detected=session.get("fall_confirmed", False),
+    )
+
+    if fall_result.get("level") == "danger":
+        session["fall_confirmed"] = True
+
+    abnormal_result = predict_abnormal_chunk(abnormal_chunk)
+    vital_result = predict_vital_chunk(vital_chunk)
+    current_overall = make_current_overall(fall_result, abnormal_result, vital_result)
+
+    result = {
+        "time": now_iso(),
+        "step": cursor + 1,
+        "second": current_seconds,
+        "window": {
+            "fps": fps,
+            "fall_window_frames": window_frames,
+            "window_seconds": round(window_frames / fps, 2),
+        },
+        "overall": current_overall,
+        "fall": fall_result,
+        "abnormal": abnormal_result,
+        "vital": vital_result,
+        "db_saved": False,
+        "db_status": "none",
+    }
+
+    event_key = f"{cursor}:{fall_result['level']}:{abnormal_result['level']}"
+
+    if should_save_event(result) and event_key not in session["saved_event_keys"]:
+        save_result = save_event_to_db(
+            "integrated_realtime_event",
+            {
+                "session_id": session_id,
+                "result": result,
+            },
+        )
+
+        result["db_saved"] = save_result["saved"]
+        result["db_status"] = save_result["db_status"]
+        result["db_id"] = save_result["id"]
+
+        session["saved_event_keys"].add(event_key)
+
+    session["history"].insert(0, result)
+    session["cursor"] += 1
+
+    final_summary = make_final_summary(session["history"])
+    done = session["cursor"] >= total_steps
+
+    if done and should_save_event({}, final_summary) and not session["final_saved"]:
+        save_event_to_db(
+            "integrated_final_summary",
+            {
+                "session_id": session_id,
+                "final_summary": final_summary,
+                "status": session_status(session_id),
+            },
+        )
+        session["final_saved"] = True
 
     return {
-        "mongo_connected": True,
-        "total_events": fall_alert_count,
-        "fall_alert_count": fall_alert_count,
-        "exception_count": 0,
+        "done": done,
+        "result": result,
+        "status": session_status(session_id),
+        "history": session["history"][:120],
+        "final_summary": final_summary,
     }
 
 
-@router.delete("/events")
-def delete_all_events():
-    if events_collection is None:
-        return {
-            "deleted_count": 0,
-            "message": "MongoDB가 연결되지 않았습니다.",
-        }
+@router.get("/saved-events")
+def get_saved_events(limit: int = 20):
+    limit = max(1, min(limit, 100))
 
-    result = events_collection.delete_many({})
+    if mongo_collection is not None:
+        try:
+            docs = list(
+                mongo_collection
+                .find({})
+                .sort("saved_at", -1)
+                .limit(limit)
+            )
+
+            for doc in docs:
+                doc["_id"] = str(doc["_id"])
+
+            return {
+                "db_connected": True,
+                "db_error": None,
+                "items": docs,
+                "count": len(docs),
+            }
+
+        except Exception as e:
+            return {
+                "db_connected": False,
+                "db_error": str(e),
+                "items": SAVED_LOGS[:limit],
+                "count": len(SAVED_LOGS[:limit]),
+            }
 
     return {
-        "deleted_count": result.deleted_count,
-        "message": "이벤트 로그를 삭제했습니다.",
+        "db_connected": False,
+        "db_error": mongo_error,
+        "items": SAVED_LOGS[:limit],
+        "count": len(SAVED_LOGS[:limit]),
     }
+
+
+@router.delete("/saved-events")
+def clear_saved_events():
+    deleted_count = 0
+
+    if mongo_collection is not None:
+        try:
+            result = mongo_collection.delete_many({})
+            deleted_count = result.deleted_count
+        except Exception as e:
+            return {
+                "success": False,
+                "message": "MongoDB 저장 로그 삭제 중 오류가 발생했습니다.",
+                "error": str(e),
+            }
+
+    memory_count = len(SAVED_LOGS)
+    SAVED_LOGS.clear()
+
+    return {
+        "success": True,
+        "message": "DB 저장 로그가 삭제되었습니다.",
+        "deleted_count": deleted_count,
+        "memory_deleted_count": memory_count,
+    }
+
+    # =========================================================
+# main.py 호환용 함수
+# main.py에서 startup_fall_dashboard, shutdown_fall_dashboard를 import하므로
+# FallDashboard.py에 없으면 import 에러가 발생한다.
+# =========================================================
+
+async def startup_fall_dashboard():
+    """
+    FastAPI 서버 시작 시 낙상 대시보드 초기화용 함수.
+    현재 FallDashboard에서 별도 시작 작업이 없으면 그대로 통과한다.
+    """
+    try:
+        print("[STARTUP] FallDashboard 시작 완료")
+        return True
+    except Exception as e:
+        print(f"[STARTUP] FallDashboard 시작 중 오류: {e}")
+        return False
+
+
+async def shutdown_fall_dashboard():
+    """
+    FastAPI 서버 종료 시 낙상 대시보드 정리용 함수.
+    현재 별도 종료 작업이 없으면 그대로 통과한다.
+    """
+    try:
+        print("[SHUTDOWN] FallDashboard 종료 완료")
+        return True
+    except Exception as e:
+        print(f"[SHUTDOWN] FallDashboard 종료 중 오류: {e}")
+        return False

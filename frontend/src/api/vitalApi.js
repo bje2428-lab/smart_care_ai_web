@@ -1,68 +1,28 @@
-const rawApiUrls =
-  import.meta.env.VITE_API_URLS ||
-  import.meta.env.VITE_API_URL ||
-  import.meta.env.VITE_BACKEND_URL ||
-  "";
+export const VITAL_API_URL =
+  import.meta.env.VITE_API_URL || import.meta.env.VITE_BACKEND_URL;
 
-const API_CANDIDATES = rawApiUrls
-  .split(",")
-  .map((url) => url.trim())
-  .filter(Boolean)
-  .map((url) => url.replace(/\/$/, ""));
-
-let selectedApiUrl = null;
-
-function getErrorMessage(data, status) {
-  const message =
-    data?.detail?.message ||
-    data?.detail ||
-    data?.message ||
-    `API 요청 실패: ${status}`;
-
-  return typeof message === "string" ? message : JSON.stringify(message);
-}
-
-async function resolveApiUrl() {
-  if (selectedApiUrl) {
-    return selectedApiUrl;
-  }
-
-  if (API_CANDIDATES.length === 0) {
+function getApiUrl() {
+  if (!VITAL_API_URL) {
     throw new Error(
-      ".env에 VITE_API_URLS 또는 VITE_API_URL이 설정되어 있지 않습니다.",
+      "VITE_API_URL이 설정되지 않았습니다. frontend/.env 파일에 실제 백엔드 주소를 넣어주세요.",
     );
   }
 
-  for (const baseUrl of API_CANDIDATES) {
-    try {
-      const response = await fetch(`${baseUrl}/vital/health`);
-
-      if (response.ok) {
-        selectedApiUrl = baseUrl;
-        return selectedApiUrl;
-      }
-    } catch (error) {
-      // 다음 후보 주소 확인
-    }
-  }
-
-  throw new Error(
-    `사용 가능한 Vital API 서버를 찾지 못했습니다. 확인한 주소: ${API_CANDIDATES.join(
-      ", ",
-    )}`,
-  );
+  return VITAL_API_URL.replace(/\/$/, "");
 }
 
 async function request(path, options = {}) {
-  const baseUrl = await resolveApiUrl();
+  const baseUrl = getApiUrl();
   const url = `${baseUrl}${path}`;
 
+  const isFormData = options.body instanceof FormData;
+
   const response = await fetch(url, {
+    ...options,
     headers: {
-      "Content-Type": "application/json",
+      ...(isFormData ? {} : { "Content-Type": "application/json" }),
       ...(options.headers || {}),
     },
-    ...options,
   });
 
   let data = null;
@@ -74,48 +34,82 @@ async function request(path, options = {}) {
   }
 
   if (!response.ok) {
-    throw new Error(getErrorMessage(data, response.status));
+    const message =
+      data?.detail || data?.message || `API 요청 실패: ${response.status}`;
+
+    throw new Error(message);
   }
 
   return data;
 }
 
-export function getSelectedVitalApiUrl() {
-  return selectedApiUrl;
-}
-
-export function getVitalApiCandidates() {
-  return API_CANDIDATES;
-}
-
-export async function getVitalHealth() {
+export function getVitalHealth() {
   return request("/vital/health");
 }
 
-export async function getVitalFeatures() {
+export function getVitalFeatures() {
   return request("/vital/features");
 }
 
-export async function predictVital(features) {
+export function predictVital(features) {
   return request("/vital/predict", {
     method: "POST",
-    body: JSON.stringify({
-      features: features.map((value) => Number(value)),
-    }),
+    body: JSON.stringify({ features }),
   });
 }
 
-export async function getVitalHistory(limit = 20) {
+export function predictVitalCsv(file) {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  return request("/vital/predict-file", {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export function uploadVitalSimulationCsv(file) {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  return request("/vital/simulation/upload", {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export function getVitalSimulationStatus() {
+  return request("/vital/simulation/status");
+}
+
+export function resetVitalSimulation() {
+  return request("/vital/simulation/reset", {
+    method: "POST",
+  });
+}
+
+export function clearVitalSimulation() {
+  return request("/vital/simulation/clear", {
+    method: "POST",
+  });
+}
+
+export function nextVitalSimulation() {
+  return request("/vital/simulation/next", {
+    method: "POST",
+  });
+}
+
+export function getVitalHistory(limit = 30) {
   return request(`/vital/history?limit=${limit}`);
 }
 
-export async function getVitalStats() {
+export function getVitalStats() {
   return request("/vital/stats");
 }
 
-export async function reloadVitalModel() {
-  return request("/vital/reload", {
+export function resetVitalCounter() {
+  return request("/vital/reset", {
     method: "POST",
-    body: JSON.stringify({}),
   });
 }
