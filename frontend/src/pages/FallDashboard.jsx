@@ -146,8 +146,68 @@ function getFirstNumber(...values) {
   return 0;
 }
 
+function unwrapFallPayload(data) {
+  if (!data) return {};
+
+  if (data.result && typeof data.result === "object") {
+    return {
+      ...data.result,
+      _id: data._id || data.result._id,
+      created_at:
+        data.result.created_at ||
+        data.result.time ||
+        data.saved_at ||
+        data.created_at,
+      saved_at: data.saved_at || data.result.saved_at,
+      _wrapper: data,
+    };
+  }
+
+  if (data.fall && typeof data.fall === "object") {
+    return {
+      ...data.fall,
+      _id: data._id || data.fall._id,
+      created_at: data.fall.created_at || data.fall.time || data.saved_at,
+      saved_at: data.saved_at || data.fall.saved_at,
+      _wrapper: data,
+    };
+  }
+
+  return data;
+}
+
+function getNestedValue(source, keys) {
+  if (!source) return undefined;
+
+  for (const key of keys) {
+    if (source[key] !== undefined && source[key] !== null) return source[key];
+  }
+
+  return undefined;
+}
+
+function splitEvidenceText(value) {
+  if (!value) return [];
+
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+
+  return String(value)
+    .split("/")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function normalizeFallResult(data, fallbackFileName = "-") {
-  const result = data || {};
+  const result = unwrapFallPayload(data || {});
+  const features = result.features || {};
+  const behavior =
+    result.behavior_analysis ||
+    result.fall_behavior_analysis ||
+    result.pattern_analysis ||
+    result.analysis ||
+    {};
 
   const rawProb = getFromResult(result, [
     "raw_model_fall_prob",
@@ -159,7 +219,14 @@ function normalizeFallResult(data, fallbackFileName = "-") {
     "probability",
   ]);
 
-  const fallProb = normalizeProbability(rawProb);
+  const riskScoreValue = getNestedValue(result, ["risk_score", "riskScore"]);
+  const riskScoreProb =
+    riskScoreValue !== undefined && riskScoreValue !== null
+      ? normalizeProbability(riskScoreValue)
+      : null;
+
+  const fallProb =
+    riskScoreProb !== null ? riskScoreProb : normalizeProbability(rawProb);
 
   const speedMax = getFirstNumber(
     getFromResult(result, [
@@ -197,23 +264,160 @@ function normalizeFallResult(data, fallbackFileName = "-") {
     ]),
   );
 
+  const centerMove = getFirstNumber(
+    getFromResult(result, ["center_move", "centerMove", "center_movement"]),
+  );
+
   let status =
     result.status ||
     result.prediction ||
     result.label ||
     result.result_label ||
+    result.state ||
     "Normal";
 
   if (status === "Exception") status = "Normal";
 
-  if (fallProb >= 0.7) {
+  const statusText = String(status).toLowerCase();
+  const percent = Math.round(fallProb * 100);
+
+  if (
+    result.alert === true ||
+    statusText.includes("fall alert") ||
+    statusText.includes("fall") ||
+    percent >= 70
+  ) {
     status = "Fall Alert";
+  } else if (statusText.includes("주의") || percent >= 40) {
+    status = "주의";
+  } else {
+    status = "Normal";
   }
 
-  const alert =
-    result.alert !== undefined
-      ? Boolean(result.alert)
-      : status === "Fall Alert";
+  const alert = status === "Fall Alert";
+
+  const rawActionLabel =
+    behavior.behavior_case ||
+    behavior.fall_action ||
+    behavior.action ||
+    result.behavior_case ||
+    result.fall_action ||
+    result.action_label ||
+    result.action_case ||
+    "";
+
+  const lowActionWhenAlert =
+    alert &&
+    (!rawActionLabel ||
+      String(rawActionLabel).includes("낙상 가능성 낮음") ||
+      String(rawActionLabel).includes("행동 케이스 분석 없음") ||
+      String(rawActionLabel).includes("데이터 없음"));
+
+  const actionLabel = lowActionWhenAlert
+    ? percent >= 70 && speedMax >= 0.8 && movementAfter <= 0.2
+      ? "속도 급증 후 움직임 감소 낙상 의심"
+      : "낙상 위험 패턴"
+    : rawActionLabel || (alert ? "낙상 위험 패턴" : "낙상 가능성 낮음");
+
+  let direction =
+    behavior.fall_direction ||
+    behavior.direction ||
+    result.fall_direction ||
+    result.direction ||
+    "-";
+
+  if (
+    alert &&
+    (!direction || direction === "-" || String(direction).includes("부족"))
+  ) {
+    direction = "방향 정보 부족";
+  }
+
+  const rawLikelyCause =
+    behavior.cause_guess ||
+    behavior.estimated_cause ||
+    behavior.cause ||
+    result.cause_guess ||
+    result.estimated_cause ||
+    result.fall_cause ||
+    result.likely_cause ||
+    "";
+
+  const lowCauseWhenAlert =
+    alert &&
+    (!rawLikelyCause ||
+      String(rawLikelyCause).includes("충분하지 않습니다") ||
+      String(rawLikelyCause).includes("낙상 기준보다 낮") ||
+      String(rawLikelyCause).includes("낙상 가능성 낮"));
+
+  const likelyCause = lowCauseWhenAlert
+    ? `최종 낙상 위험도 ${percent}%로 Fall Alert 기준선 70% 이상입니다. 높이 변화만으로는 크지 않지만 최대 속도, 이후 움직임, 중심 이동량과 모델 판단을 함께 반영했습니다.`
+    : rawLikelyCause ||
+      (alert
+        ? "속도, 높이 변화, 이후 움직임 기준에서 낙상 패턴이 확인되었습니다."
+        : "낙상 기준선을 넘는 변화가 충분하지 않습니다.");
+
+  const evidenceList =
+    splitEvidenceText(behavior.evidence_list).length > 0
+      ? splitEvidenceText(behavior.evidence_list)
+      : splitEvidenceText(
+          behavior.judgement_basis ||
+            behavior.evidence ||
+            result.judgement_basis ||
+            result.evidence ||
+            result.reason,
+        );
+
+  const safeEvidenceList =
+    evidenceList.length > 0
+      ? evidenceList
+      : [
+          `위험도: ${percent}%`,
+          `최대 속도: ${speedMax.toFixed(4)} m/s`,
+          `높이 변화: ${heightDrop.toFixed(4)} m`,
+          `이후 움직임: ${movementAfter.toFixed(4)}`,
+        ];
+
+  const recommendationText =
+    behavior.recommendation ||
+    behavior.response_recommendation ||
+    result.recommendation ||
+    result.response_recommendation ||
+    (alert
+      ? "즉시 대상자 상태 확인 후 보호자 연락 또는 응급 대응을 진행하세요."
+      : "추가 움직임 변화를 모니터링하세요.");
+
+  const recommendations = Array.isArray(result.recommendations)
+    ? result.recommendations
+    : [recommendationText].filter(Boolean);
+
+  const rawSummary =
+    behavior.summary || result.analysis_summary || result.message || "";
+
+  const analysisSummary =
+    alert &&
+    (!rawSummary ||
+      String(rawSummary).includes("낙상 가능성 낮음") ||
+      String(rawSummary).includes("기준에 도달하지"))
+      ? `${actionLabel} 패턴이 감지되었습니다.`
+      : rawSummary ||
+        (alert
+          ? `${actionLabel} 패턴이 감지되었습니다.`
+          : `${actionLabel} 상태로 판단됩니다.`);
+
+  const rawBehaviorPattern =
+    result.behavior_pattern || behavior.summary || result.message || "";
+
+  const behaviorPattern =
+    alert &&
+    (!rawBehaviorPattern ||
+      String(rawBehaviorPattern).includes("낙상 가능성 낮음") ||
+      String(rawBehaviorPattern).includes("기준에 도달하지"))
+      ? "Fall Alert 기준선 70% 이상으로 낙상 위험 구간이 감지되었습니다."
+      : rawBehaviorPattern ||
+        (alert
+          ? "낙상 위험 구간에서 속도 변화와 높이 변화가 함께 나타났습니다."
+          : "현재 구간은 낙상 기준에 도달하지 않았습니다.");
 
   const windowResults = Array.isArray(result.window_results)
     ? result.window_results.map((item, index) =>
@@ -228,32 +432,41 @@ function normalizeFallResult(data, fallbackFileName = "-") {
       )
     : [];
 
+  const fileName =
+    result.file_name ||
+    result.filename ||
+    result.file ||
+    result.source_file ||
+    fallbackFileName ||
+    "-";
+
   return {
     ...result,
     status,
     alert,
 
-    file_name:
-      result.file_name ||
-      result.filename ||
-      result.file ||
-      fallbackFileName ||
-      "-",
-    filename:
-      result.filename ||
-      result.file_name ||
-      result.file ||
-      fallbackFileName ||
-      "-",
+    _id: result._id || data?._id,
+    created_at:
+      result.created_at ||
+      result.time ||
+      result.saved_at ||
+      data?.saved_at ||
+      data?.created_at,
+    saved_at: result.saved_at || data?.saved_at,
+
+    file_name: fileName,
+    filename: result.filename || result.file_name || result.file || fileName,
 
     raw_model_fall_prob: fallProb,
     fall_prob: fallProb,
     fall_probability: fallProb,
+    risk_score: percent,
 
     speed_max: speedMax,
     max_speed: speedMax,
     height_drop: heightDrop,
     movement_after: movementAfter,
+    center_move: centerMove,
 
     frame_start:
       result.frame_start !== undefined && result.frame_start !== null
@@ -266,22 +479,47 @@ function normalizeFallResult(data, fallbackFileName = "-") {
 
     frame_count: toSafeNumber(result.frame_count),
     point_count: toSafeNumber(result.point_count),
+    row_count: toSafeNumber(result.row_count),
 
     window_results: windowResults,
 
-    action_case: result.action_case || "unknown",
-    action_label: result.action_label || "행동 케이스 분석 없음",
-    behavior_pattern:
-      result.behavior_pattern || "행동 패턴 분석 정보가 없습니다.",
-    likely_cause: result.likely_cause || "추정 원인 정보가 없습니다.",
-    analysis_summary: result.analysis_summary || "분석 요약 정보가 없습니다.",
-    direction: result.direction || "-",
-    risk_reason: Array.isArray(result.risk_reason) ? result.risk_reason : [],
-    recommendations: Array.isArray(result.recommendations)
-      ? result.recommendations
-      : [],
+    action_case: result.action_case || actionLabel,
+    action_label: actionLabel,
+    behavior_case: actionLabel,
+    fall_action: actionLabel,
+    behavior_pattern: behaviorPattern,
+    likely_cause: likelyCause,
+    fall_cause: result.fall_cause || behavior.fall_cause || likelyCause,
+    cause_guess: result.cause_guess || behavior.cause_guess || likelyCause,
+    analysis_summary: analysisSummary,
+    direction,
+    fall_direction: direction,
+    risk_reason: Array.isArray(result.risk_reason)
+      ? result.risk_reason
+      : safeEvidenceList,
+    recommendations,
+
+    behavior_analysis: {
+      ...behavior,
+      summary: analysisSummary,
+      behavior_case: actionLabel,
+      action: actionLabel,
+      fall_action: actionLabel,
+      direction,
+      fall_direction: direction,
+      cause: likelyCause,
+      cause_guess: likelyCause,
+      estimated_cause: likelyCause,
+      fall_cause: result.fall_cause || behavior.fall_cause || likelyCause,
+      judgement_basis: safeEvidenceList.join(" / "),
+      evidence: safeEvidenceList.join(" / "),
+      evidence_list: safeEvidenceList,
+      recommendation: recommendationText,
+      response_recommendation: recommendationText,
+    },
 
     db_saved: Boolean(result.db_saved),
+    event_saved: Boolean(result.event_saved),
 
     message:
       result.message ||
@@ -1544,6 +1782,7 @@ function FallDashboard() {
     setMessage("10프레임 단위 실시간 시뮬레이션을 시작합니다.");
 
     let firstFall = null;
+    const collectedResults = [];
 
     for (let i = 0; i < frameChunks.length; i += 1) {
       if (!realtimeRunningRef.current) break;
@@ -1554,6 +1793,7 @@ function FallDashboard() {
       try {
         const result = await predictCsvChunk(chunk);
 
+        collectedResults.push(result);
         setPredictResult(result);
         setLiveResults((prev) => [result, ...prev]);
         setLivePage(1);
@@ -1588,6 +1828,7 @@ function FallDashboard() {
           row_count: chunk.rowCount,
         };
 
+        collectedResults.push(safeResult);
         setPredictResult(safeResult);
         setLiveResults((prev) => [safeResult, ...prev]);
         setLivePage(1);
@@ -1601,19 +1842,59 @@ function FallDashboard() {
 
     try {
       const finalResult = await runWholeFileAggregatePredict(true);
-      setPredictResult(finalResult);
 
-      if (finalResult.window_results?.length > 0) {
-        setLiveResults([...finalResult.window_results].reverse());
-        setLivePage(1);
-      }
+      const peakResult =
+        collectedResults.length > 0
+          ? collectedResults.reduce((best, item) =>
+              getDisplayFallPercent(item) > getDisplayFallPercent(best)
+                ? item
+                : best,
+            )
+          : finalResult;
 
-      if (finalResult.status === "Fall Alert") {
+      const mergedFinalResult = normalizeFallResult(
+        {
+          ...finalResult,
+          status: peakResult.status,
+          alert: peakResult.status === "Fall Alert",
+          risk_score: getDisplayFallPercent(peakResult),
+          fall_prob: getDisplayFallPercent(peakResult) / 100,
+          raw_model_fall_prob: getDisplayFallPercent(peakResult) / 100,
+          frame_start: peakResult.frame_start,
+          frame_end: peakResult.frame_end,
+          speed_max: peakResult.speed_max,
+          height_drop: peakResult.height_drop,
+          movement_after: peakResult.movement_after,
+          center_move: peakResult.center_move,
+          action_label: peakResult.action_label,
+          action_case: peakResult.action_case,
+          fall_action: peakResult.fall_action,
+          fall_direction: peakResult.fall_direction,
+          fall_cause: peakResult.fall_cause,
+          cause_guess: peakResult.cause_guess,
+          analysis_summary: peakResult.analysis_summary,
+          behavior_pattern: peakResult.behavior_pattern,
+          likely_cause: peakResult.likely_cause,
+          direction: peakResult.direction,
+          risk_reason: peakResult.risk_reason,
+          recommendations: peakResult.recommendations,
+          behavior_analysis: peakResult.behavior_analysis,
+          window_count: collectedResults.length,
+          window_results: collectedResults,
+        },
+        selectedFile.name,
+      );
+
+      setPredictResult(mergedFinalResult);
+      setLiveResults([...collectedResults].reverse());
+      setLivePage(1);
+
+      if (mergedFinalResult.status === "Fall Alert") {
         setMessage(
           `실시간 시뮬레이션 완료. 최종 낙상 위험도는 ${getDisplayFallPercent(
-            finalResult,
-          )}%이며, 가장 위험한 구간은 frame ${finalResult.frame_start} ~ ${
-            finalResult.frame_end
+            mergedFinalResult,
+          )}%이며, 가장 위험한 구간은 frame ${mergedFinalResult.frame_start} ~ ${
+            mergedFinalResult.frame_end
           }입니다.`,
         );
       } else {
@@ -1687,8 +1968,10 @@ function FallDashboard() {
   };
 
   const apiConnected = Boolean(serverInfo);
-  const modelReady = Boolean(fallInfo?.model_exists);
-  const mongoConnected = Boolean(fallInfo?.mongo_connected);
+  const modelReady = Boolean(fallInfo?.model_exists || fallInfo?.model_ready);
+  const mongoConnected = Boolean(
+    fallInfo?.mongo_connected || fallInfo?.db_connected,
+  );
 
   return (
     <div className="page">
@@ -1729,8 +2012,8 @@ function FallDashboard() {
 
         <div className="fall-summary-card mongo-card">
           <p>MongoDB</p>
-          <strong>{mongoConnected ? "연결됨" : "저장 비활성"}</strong>
-          <span>MongoDB가 꺼져 있어도 예측은 가능합니다.</span>
+          <strong>{mongoConnected ? "연결됨" : "DB 저장 안 함"}</strong>
+          <span>현재 낙상 로그는 화면 표시용 메모리 기준입니다.</span>
         </div>
 
         <div className="fall-summary-card">
