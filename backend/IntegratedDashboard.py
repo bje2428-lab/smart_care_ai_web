@@ -16,7 +16,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 router = APIRouter(prefix="/integrated", tags=["Integrated Dashboard"])
 
-CODE_VERSION = "integrated_v6_ESTIMATION_DB_SAVE_LOCK"
+CODE_VERSION = "integrated_v7_FALL_POSTPROCESS_SCORE_LOCK"
 
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 SAVED_LOGS = []
@@ -1189,6 +1189,99 @@ def get_fall_probability(model_obj, input_df):
     return 0.0
 
 
+def calculate_fall_postprocess_score(fall_prob: float, extracted: dict, fall_already_detected=False):
+    """
+    통합 관제용 낙상 후처리 보정.
+
+    기존 통합 관제는 risk_score = fall_prob * 100 만 사용했기 때문에
+    모델 확률이 55%처럼 낮게 나오면 실제 낙상 특징이 커도 70점 기준을 넘지 못했다.
+
+    이 함수는 RandomForest 확률에 더해 실제 낙상 물리 특징을 함께 반영한다.
+    특히 raw height_drop은 한 프레임 안의 point cloud 퍼짐 때문에 정상 구간에서도 커질 수 있으므로,
+    최종 보정은 중심점 기반 높이 변화(z_center_drop 계열)를 우선 사용한다.
+    """
+    model_score = int(clamp(round(float(fall_prob) * 100)))
+
+    raw_height_drop = float(extracted.get("height_drop", 0) or 0)
+    z_center_drop = float(extracted.get("z_center_drop", 0) or 0)
+    z_first_to_min = float(extracted.get("z_center_first_to_min_drop", 0) or 0)
+    z_peak_to_last = float(extracted.get("z_center_peak_to_last_drop", 0) or 0)
+
+    # 실제 최종 판정은 중심점 기반 높이 변화 우선.
+    # raw height_drop은 정상 point cloud의 세로 퍼짐 때문에 과대평가될 수 있어 보조값으로만 둔다.
+    effective_height_drop = max(z_center_drop, z_first_to_min, z_peak_to_last)
+
+    speed_max = float(extracted.get("speed_max", 0) or 0)
+    movement_after = float(extracted.get("movement_after", 0) or 0)
+    center_move_max = float(extracted.get("center_move_max", 0) or 0)
+    tail_movement_mean = float(extracted.get("tail_movement_mean", 0) or 0)
+
+    # 기존 rule_fall_score는 raw height_drop 기반이라 참고값으로만 사용한다.
+    raw_rule_score = int(clamp(extracted.get("rule_fall_score", 0) or 0))
+
+    post_score = model_score
+    reasons = []
+
+    # 1) 모델이 이미 높은 확률로 낙상이라고 본 경우
+    if fall_prob >= fall_threshold:
+        post_score = max(post_score, 92)
+        reasons.append("모델 확률이 Fall Alert 기준 이상")
+
+    # 2) 실제 낙상 특징이 매우 강한 경우: 70점 이상으로 보정
+    # 중심 높이 하강이 크고, 순간 속도 변화가 같이 있으면 Fall Alert로 올린다.
+    if effective_height_drop >= 1.00 and speed_max >= 0.80:
+        post_score = max(post_score, 92)
+        reasons.append("중심 높이 하강 1.00 이상 + 순간 속도 변화")
+
+    elif effective_height_drop >= 0.80 and speed_max >= 0.70:
+        post_score = max(post_score, 88)
+        reasons.append("중심 높이 하강 0.80 이상 + 속도 변화")
+
+    elif effective_height_drop >= 0.70 and speed_max >= 0.60:
+        post_score = max(post_score, 82)
+        reasons.append("중심 높이 하강 0.70 이상 + 속도 변화")
+
+    # 3) 낙상 후보/주의 구간: 70점은 넘기지 않는다.
+    # 30~39초 같은 자세 변화 구간이 Fall Alert로 튀지 않도록 50~65점대로 제한한다.
+    elif effective_height_drop >= 0.55 and speed_max >= 0.60:
+        post_score = max(post_score, 65)
+        reasons.append("높이 변화와 속도 변화가 있으나 Fall Alert 기준 미만")
+
+    elif effective_height_drop >= 0.45 or speed_max >= 0.90:
+        post_score = max(post_score, 55)
+        reasons.append("낙상 후보 수준의 변화 감지")
+
+    # 4) 모델은 애매하지만 낙상 후 움직임 감소가 같이 보이는 경우 보정
+    if effective_height_drop >= 0.65 and movement_after <= 0.25 and speed_max >= 0.50:
+        post_score = max(post_score, 85)
+        reasons.append("높이 하강 후 움직임 감소")
+
+    # 5) 이미 앞 구간에서 낙상이 확정된 뒤 바닥에 머무는 구간
+    # 단, 움직임이 거의 없고 중심 높이가 낮은 경우에만 낙상 후 상태로 유지한다.
+    if fall_already_detected and movement_after <= 0.20 and effective_height_drop >= 0.30:
+        post_score = max(post_score, 72)
+        reasons.append("이전 낙상 이후 움직임 적음")
+
+    final_score = int(clamp(post_score))
+
+    return {
+        "model_score": model_score,
+        "raw_rule_score": raw_rule_score,
+        "postprocess_score": final_score,
+        "final_score": final_score,
+        "effective_height_drop": round(effective_height_drop, 4),
+        "raw_height_drop": round(raw_height_drop, 4),
+        "z_center_drop": round(z_center_drop, 4),
+        "z_center_first_to_min_drop": round(z_first_to_min, 4),
+        "z_center_peak_to_last_drop": round(z_peak_to_last, 4),
+        "speed_max": round(speed_max, 4),
+        "movement_after": round(movement_after, 4),
+        "center_move_max": round(center_move_max, 4),
+        "tail_movement_mean": round(tail_movement_mean, 4),
+        "reasons": reasons,
+    }
+
+
 def predict_fall_chunk(chunk: pd.DataFrame, fall_already_detected=False):
     if chunk.empty:
         return {
@@ -1206,6 +1299,9 @@ def predict_fall_chunk(chunk: pd.DataFrame, fall_already_detected=False):
             "description": "-",
             "features": {
                 "fall_prob": 0,
+                "model_score": 0,
+                "postprocess_score": 0,
+                "effective_height_drop": 0,
                 "speed_max": 0,
                 "speed_mean": 0,
                 "height_drop": 0,
@@ -1220,11 +1316,21 @@ def predict_fall_chunk(chunk: pd.DataFrame, fall_already_detected=False):
     try:
         input_df, extracted = extract_fall_features_for_model(chunk)
         fall_prob = get_fall_probability(fall_model, input_df)
-        risk_score = int(clamp(round(fall_prob * 100)))
 
         speed_max = float(extracted.get("speed_max", 0))
         height_drop = float(extracted.get("height_drop", 0))
         movement_after = float(extracted.get("movement_after", 0))
+
+        score_info = calculate_fall_postprocess_score(
+            fall_prob=fall_prob,
+            extracted=extracted,
+            fall_already_detected=fall_already_detected,
+        )
+
+        risk_score = int(score_info["final_score"])
+        model_score = int(score_info["model_score"])
+        postprocess_score = int(score_info["postprocess_score"])
+        effective_height_drop = float(score_info["effective_height_drop"])
 
         z = numeric_series(chunk, ["z", "height"])
         v = numeric_series(chunk, ["v", "velocity", "speed"])
@@ -1236,30 +1342,40 @@ def predict_fall_chunk(chunk: pd.DataFrame, fall_already_detected=False):
 
         fall_action, fall_direction, cause_guess, fall_cause, scenario, description = infer_fall_action(
             chunk,
-            height_drop,
+            effective_height_drop,
             speed_max,
             movement_after,
             fall_already_detected,
         )
 
-        if fall_prob >= fall_threshold:
+        reason_detail = ", ".join(score_info.get("reasons") or [])
+        if not reason_detail:
+            reason_detail = "낙상 보정 기준을 넘는 물리 특징은 크지 않습니다."
+
+        # 통합 관제 최종 기준:
+        # 70점 이상이면 Fall Alert, 40~69점은 주의, 그 미만은 Normal.
+        if risk_score >= 70:
             state = "Fall Alert"
             level = "danger"
             reason = (
-                f"낙상 RF/SMOTE 모델이 낙상으로 예측했습니다. "
-                f"예측확률 {risk_score}%, 기준 {round(fall_threshold * 100)}%."
+                f"최종점수 {risk_score}점"
+                f"보정근거: {reason_detail}."
             )
         elif risk_score >= 40:
             state = "주의"
             level = "warning"
             reason = (
-                f"낙상 모델 확률은 기준 미만이지만 움직임 변화가 있어 주의로 표시합니다. "
-                f"예측확률 {risk_score}%."
+                f"낙상 모델 확률 또는 움직임 변화가 있어 주의로 표시합니다. "
+                f"최종점수 {risk_score}점"
+                f"보정근거: {reason_detail}."
             )
         else:
             state = "Normal"
             level = "normal"
-            reason = f"낙상 모델 기준 미만입니다. 예측확률 {risk_score}%."
+            reason = (
+                f"낙상 기준 미만입니다. "
+                f"최종점수 {risk_score}점"
+            )
 
         return {
             "module": "fall",
@@ -1276,16 +1392,29 @@ def predict_fall_chunk(chunk: pd.DataFrame, fall_already_detected=False):
             "description": description,
             "features": {
                 "fall_prob": round(fall_prob, 4),
+                "model_score": model_score,
+                "postprocess_score": postprocess_score,
+                "final_score": risk_score,
+                "raw_rule_score": score_info.get("raw_rule_score", 0),
+                "effective_height_drop": round(effective_height_drop, 4),
+                "raw_height_drop": round(height_drop, 4),
+                "z_center_drop": score_info.get("z_center_drop", 0),
+                "z_center_first_to_min_drop": score_info.get("z_center_first_to_min_drop", 0),
+                "z_center_peak_to_last_drop": score_info.get("z_center_peak_to_last_drop", 0),
                 "speed_max": round(speed_max, 4),
                 "speed_mean": round(speed_mean, 4),
                 "height_drop": round(height_drop, 4),
                 "movement_after": round(movement_after, 4),
+                "center_move_max": score_info.get("center_move_max", 0),
+                "tail_movement_mean": score_info.get("tail_movement_mean", 0),
                 "z_mean": round(z_mean, 4),
                 "z_min": round(z_min, 4),
                 "z_max": round(z_max, 4),
-                "model_mode": "mmwave_rf_smote_model",
+                "model_mode": "mmwave_rf_smote_model_with_postprocess",
                 "threshold": fall_threshold,
+                "alert_score_threshold": 70,
                 "feature_count": len(fall_feature_columns),
+                "postprocess_reasons": score_info.get("reasons", []),
             },
         }
 
@@ -1307,6 +1436,8 @@ def predict_fall_chunk(chunk: pd.DataFrame, fall_already_detected=False):
             "description": "-",
             "features": {
                 "fall_prob": 0,
+                "model_score": 0,
+                "postprocess_score": 0,
                 "speed_max": 0,
                 "speed_mean": 0,
                 "height_drop": 0,
